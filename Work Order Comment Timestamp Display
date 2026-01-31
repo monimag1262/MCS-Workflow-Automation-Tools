@@ -1,0 +1,414 @@
+// ==UserScript==
+// @name         TOM Pending Action Timer - TOM  COMMENT
+// @namespace    http://tampermonkey.net/
+// @version      1.1
+// @description  Adds elapsed time timer to TOM Pending Action work orders
+// @author       Your Name
+// @match        https://aap-na.corp.amazon.com/v2/page/*
+// @match        https://aap-na.corp.amazon.com/page/*
+// @grant        GM_xmlhttpRequest
+// @grant        unsafeWindow
+// @connect      aap-na.corp.amazon.com
+// @run-at       document-start
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    console.log('TOM Pending Action Timer (Fast Load) initialized');
+
+    // ═══════════════════════════════════════════════════════════════
+    // CONFIGURATION
+    // ═══════════════════════════════════════════════════════════════
+
+    const CONFIG = {
+        updateInterval: 60000, // Update timers every 60 seconds
+        maxRetries: 20, // Maximum number of retry attempts
+        retryInterval: 200, // Check every 200ms for table
+        debounceDelay: 300, // Reduced from 1000ms
+        timerStyle: {
+            background: 'linear-gradient(135deg, #FF69B4 0%, #FF1493 100%)',
+            color: 'white',
+            padding: '5px 12px',
+            borderRadius: '15px',
+            fontWeight: 'bold',
+            fontSize: '11px',
+            display: 'inline-block',
+            boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
+            whiteSpace: 'nowrap'
+        }
+    };
+
+    // ═══════════════════════════════════════════════════════════════
+    // UTILITY FUNCTIONS
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Format elapsed time in a human-readable format
+     * @param {number} minutes - Total minutes elapsed
+     * @returns {string} Formatted time string (e.g., "7h 23m")
+     */
+    function formatElapsedTime(minutes) {
+        if (!minutes || minutes < 0) return '--';
+
+        const hours = Math.floor(minutes / 60);
+        const mins = minutes % 60;
+
+        if (hours === 0) {
+            return `${mins}m`;
+        } else if (mins === 0) {
+            return `${hours}h`;
+        } else {
+            return `${hours}h ${mins}m`;
+        }
+    }
+
+    /**
+     * Parse custom date format from AAP
+     * @param {string} dateStr - Date string to parse
+     * @returns {Date|null} Parsed date or null if invalid
+     */
+    function parseCustomDate(dateStr) {
+        try {
+            if (!dateStr) return null;
+
+            // Remove timezone offset if present
+            const cleanDateStr = dateStr.replace(/\s*-\d{2}:\d{2}/, '').trim();
+
+            // Split into components
+            const parts = cleanDateStr.split(' ');
+            if (parts.length < 4) return null;
+
+            const month = parts[0];
+            const day = parts[1].replace(',', '');
+            const year = parts[2];
+            const timeStr = parts[3];
+
+            // Parse time
+            let [hours, minutesAndAMPM] = timeStr.split(':');
+            let minutes = minutesAndAMPM.slice(0, 2);
+            let ampm = minutesAndAMPM.slice(2);
+
+            hours = parseInt(hours);
+            if (ampm === 'PM' && hours < 12) hours += 12;
+            if (ampm === 'AM' && hours === 12) hours = 0;
+
+            const formattedDate = `${month} ${day} ${year} ${hours}:${minutes}:00`;
+            const date = new Date(formattedDate);
+
+            if (isNaN(date.getTime())) return null;
+
+            return date;
+        } catch (error) {
+            return null;
+        }
+    }
+
+    /**
+     * Calculate time difference in minutes
+     * @param {Date|string|number} timestamp - Timestamp to compare
+     * @returns {number} Minutes elapsed
+     */
+    function getTimeDifferenceInMinutes(timestamp) {
+        if (!timestamp) return 0;
+
+        try {
+            let date;
+
+            if (timestamp instanceof Date) {
+                date = timestamp;
+            } else if (typeof timestamp === 'string') {
+                date = parseCustomDate(timestamp);
+            } else if (typeof timestamp === 'number') {
+                date = new Date(timestamp);
+            }
+
+            if (!date || isNaN(date.getTime())) return 0;
+
+            const currentTime = new Date().getTime();
+            const timeDiff = currentTime - date.getTime();
+            return Math.floor(timeDiff / (1000 * 60));
+        } catch (error) {
+            return 0;
+        }
+    }
+
+    /**
+     * Create a styled timer element
+     * @param {number} minutes - Minutes to display
+     * @returns {HTMLElement} Styled timer span
+     */
+    function createTimerElement(minutes) {
+        const timerSpan = document.createElement('span');
+        timerSpan.className = 'tom-timer';
+
+        // Apply styles
+        Object.assign(timerSpan.style, CONFIG.timerStyle);
+
+        // Set content
+        timerSpan.innerHTML = `⏱️ ${formatElapsedTime(minutes)}`;
+
+        return timerSpan;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // TABLE PROCESSING
+    // ═══════════════════════════════════════════════════════════════
+
+    // Cache column indices for performance
+    let cachedColumnIndices = null;
+
+    /**
+     * Find the column index for a given header name
+     * @param {HTMLTableElement} table - Table element
+     * @param {string} headerText - Text to search for in headers
+     * @returns {number} Column index or -1 if not found
+     */
+    function findColumnIndex(table, headerText) {
+        const headers = table.querySelectorAll('thead th');
+        for (let i = 0; i < headers.length; i++) {
+            const headerContent = headers[i].textContent.trim();
+            if (headerContent.includes(headerText)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Get column indices with caching
+     * @param {HTMLTableElement} table - Table element
+     * @returns {Object|null} Column indices or null if not found
+     */
+    function getColumnIndices(table) {
+        if (cachedColumnIndices) return cachedColumnIndices;
+
+        const escalationsColIndex = findColumnIndex(table, 'Escalations');
+        const tagsColIndex = findColumnIndex(table, 'Work Order Tags');
+        const modifiedColIndex = findColumnIndex(table, 'Modified');
+
+        if (escalationsColIndex === -1 || tagsColIndex === -1 || modifiedColIndex === -1) {
+            return null;
+        }
+
+        cachedColumnIndices = {
+            escalationsColIndex,
+            tagsColIndex,
+            modifiedColIndex
+        };
+
+        return cachedColumnIndices;
+    }
+
+    /**
+     * Process a single table row for TOM Pending Action
+     * @param {HTMLTableRowElement} row - Table row to process
+     * @param {Object} columnIndices - Column indices object
+     */
+    function processRow(row, columnIndices) {
+        try {
+            const cells = row.querySelectorAll('td');
+            if (cells.length === 0) return;
+
+            const { escalationsColIndex, tagsColIndex, modifiedColIndex } = columnIndices;
+
+            // Check if this row has TOM Pending Action
+            const escalationsCell = cells[escalationsColIndex];
+            if (!escalationsCell) return;
+
+            const escalationsText = escalationsCell.textContent.trim();
+            const hasTOMPending = escalationsText.includes('TOM Pending Action');
+
+            if (!hasTOMPending) {
+                // Remove timer if it exists but TOM Pending is no longer present
+                const existingTimer = cells[tagsColIndex]?.querySelector('.tom-timer');
+                if (existingTimer) {
+                    existingTimer.remove();
+                }
+                return;
+            }
+
+            // Get the modified timestamp
+            const modifiedCell = cells[modifiedColIndex];
+            if (!modifiedCell) return;
+
+            const modifiedText = modifiedCell.textContent.trim();
+            const modifiedDate = parseCustomDate(modifiedText);
+
+            if (!modifiedDate) return;
+
+            // Calculate elapsed time
+            const minutesElapsed = getTimeDifferenceInMinutes(modifiedDate);
+
+            // Get or create timer in Tags column
+            const tagsCell = cells[tagsColIndex];
+            if (!tagsCell) return;
+
+            // Check if timer already exists
+            let timerElement = tagsCell.querySelector('.tom-timer');
+
+            if (timerElement) {
+                // Update existing timer
+                timerElement.innerHTML = `⏱️ ${formatElapsedTime(minutesElapsed)}`;
+            } else {
+                // Create new timer
+                timerElement = createTimerElement(minutesElapsed);
+
+                // Clear existing content if it's just "--"
+                if (tagsCell.textContent.trim() === '--') {
+                    tagsCell.innerHTML = '';
+                }
+
+                // Add timer
+                tagsCell.appendChild(timerElement);
+            }
+
+        } catch (error) {
+            console.error('Error processing row:', error);
+        }
+    }
+
+    /**
+     * Process all rows in the table
+     * @returns {boolean} True if processing was successful
+     */
+    function processTable() {
+        try {
+            // Find the main table
+            const tables = document.querySelectorAll('table');
+            const table = tables[1] || tables[0];
+
+            if (!table) return false;
+
+            // Get column indices
+            const columnIndices = getColumnIndices(table);
+            if (!columnIndices) return false;
+
+            // Process each row
+            const rows = table.querySelectorAll('tbody tr');
+            if (rows.length === 0) return false;
+
+            rows.forEach(row => {
+                processRow(row, columnIndices);
+            });
+
+            return true;
+
+        } catch (error) {
+            console.error('Error in processTable:', error);
+            return false;
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // INITIALIZATION & AUTO-UPDATE
+    // ═══════════════════════════════════════════════════════════════
+
+    let updateTimer = null;
+    let isProcessing = false;
+    let retryCount = 0;
+    let hasProcessedSuccessfully = false;
+
+    /**
+     * Attempt to process table with retry logic
+     */
+    function attemptProcessing() {
+        if (hasProcessedSuccessfully) return;
+
+        const success = processTable();
+
+        if (success) {
+            console.log('✅ TOM Timer: Successfully processed table');
+            hasProcessedSuccessfully = true;
+            setupObserver();
+            setupPeriodicUpdates();
+        } else if (retryCount < CONFIG.maxRetries) {
+            retryCount++;
+            setTimeout(attemptProcessing, CONFIG.retryInterval);
+        } else {
+            console.log('⚠️ TOM Timer: Max retries reached, will try again on mutations');
+            setupObserver();
+        }
+    }
+
+    /**
+     * Set up MutationObserver
+     */
+    function setupObserver() {
+        const observer = new MutationObserver((mutations) => {
+            if (isProcessing) return;
+
+            // Check if table exists in mutations
+            const hasTableMutation = mutations.some(mutation => {
+                return Array.from(mutation.addedNodes).some(node => {
+                    return node.nodeType === 1 &&
+                           (node.tagName === 'TABLE' || node.querySelector('table'));
+                });
+            });
+
+            if (hasTableMutation || !hasProcessedSuccessfully) {
+                // Debounce updates
+                if (updateTimer) clearTimeout(updateTimer);
+                updateTimer = setTimeout(() => {
+                    isProcessing = true;
+                    processTable();
+                    isProcessing = false;
+                }, CONFIG.debounceDelay);
+            }
+        });
+
+        // Observe the entire document
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true
+        });
+
+        console.log('👁️ TOM Timer: Observer active');
+    }
+
+    /**
+     * Set up periodic timer updates
+     */
+    function setupPeriodicUpdates() {
+        setInterval(() => {
+            if (!isProcessing) {
+                isProcessing = true;
+                processTable();
+                isProcessing = false;
+            }
+        }, CONFIG.updateInterval);
+
+        console.log('🔄 TOM Timer: Periodic updates active');
+    }
+
+    /**
+     * Initialize the script immediately
+     */
+    function initialize() {
+        console.log('🚀 TOM Timer: Initializing...');
+
+        // Try immediate processing
+        setTimeout(attemptProcessing, 0);
+
+        // Also try after a short delay as backup
+        setTimeout(() => {
+            if (!hasProcessedSuccessfully) {
+                attemptProcessing();
+            }
+        }, 500);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // START SCRIPT
+    // ═══════════════════════════════════════════════════════════════
+
+    // Start immediately
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initialize);
+        // Also try before DOMContentLoaded
+        setTimeout(initialize, 100);
+    } else {
+        initialize();
+    }
+
+})();
