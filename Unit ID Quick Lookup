@@ -1,0 +1,249 @@
+// ==UserScript==
+// @name         Paragon Unit Info Fetcherrrrrrr
+// @namespace    http://tampermonkey.net/
+// @version      2.1
+// @description  Fetch and display unit info from Fleet Monitoring, Relay Garage, and YMS
+// @author       You
+// @match        https://paragon-na.amazon.com/*
+// @grant        GM_xmlhttpRequest
+// @connect      aap-na.corp.amazon.com
+// @connect      trans-logistics.amazon.com
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    window.addEventListener('load', function() {
+        // Create button container with single button
+        const buttonContainer = document.createElement('div');
+        buttonContainer.id = 'custom-nav-buttons';
+        buttonContainer.style.position = 'fixed';
+        buttonContainer.style.top = '10px';
+        buttonContainer.style.left = '50%';
+        buttonContainer.style.transform = 'translateX(-50%)';
+        buttonContainer.style.zIndex = '99999';
+        buttonContainer.style.padding = '10px';
+        buttonContainer.style.backgroundColor = 'rgba(255, 255, 255, 0.95)';
+        buttonContainer.style.borderRadius = '8px';
+        buttonContainer.style.boxShadow = '0 2px 10px rgba(0,0,0,0.2)';
+
+        // Single button: Get Unit Info
+        const btnGetInfo = createButton('🔍 Get Unit Info', () => {
+            const unitId = prompt('Enter Unit ID:');
+            if (unitId) {
+                fetchUnitInfo(unitId);
+            }
+        });
+
+        buttonContainer.appendChild(btnGetInfo);
+        document.body.appendChild(buttonContainer);
+
+        console.log('Unit Info Fetcher loaded successfully!');
+    });
+
+    function createButton(text, onClick) {
+        const button = document.createElement('button');
+        button.textContent = text;
+        button.style.padding = '12px 24px';
+        button.style.backgroundColor = '#FF9900';
+        button.style.color = 'white';
+        button.style.border = 'none';
+        button.style.borderRadius = '4px';
+        button.style.cursor = 'pointer';
+        button.style.fontWeight = 'bold';
+        button.style.fontSize = '14px';
+        button.style.fontFamily = 'Arial, sans-serif';
+        button.onclick = onClick;
+
+        button.onmouseover = () => {
+            button.style.backgroundColor = '#EC7211';
+            button.style.transform = 'scale(1.05)';
+        };
+        button.onmouseout = () => {
+            button.style.backgroundColor = '#FF9900';
+            button.style.transform = 'scale(1)';
+        };
+
+        return button;
+    }
+
+    function fetchUnitInfo(unitId) {
+        const modal = createModal(unitId);
+        document.body.appendChild(modal);
+
+        const results = {
+            fleet: { loading: true },
+            relay: { loading: true }
+        };
+
+        // Fetch Fleet Monitoring data
+        const fleetUrl = 'https://aap-na.corp.amazon.com/page/dfd44913-d2f4-4e96-99e2-64729dbdc19a?map-layout=SPLIT&states=%5B%7B%22state%22%3A%22ACTIVE%22%2C%22reasons%22%3A%5B%5D%7D%2C%7B%22state%22%3A%22UNAVAILABLE%22%2C%22reasons%22%3A%5B%5D%7D%5D&fields=%5B%5D&fleets=%5B%220f454f75-1e45-475f-8d8b-2334ade1f6f1%22%2C%227de393df-74e1-45af-9650-560ba008bc65%22%2C%22b84ddc20-589c-4330-af67-3d38f89e28af%22%2C%22b9e02fc4-2b9f-4a70-ac7c-76b30a33bcbe%22%2C%22ba97eda1-cb03-446e-a907-474084194777%22%2C%22daa83ad7-5d8f-43a4-ba9c-76c643e45e1e%22%5D&operationalStatuses=%5B%5D&geofences=%7B%22type%22%3A%22ANYWHERE%22%2C%22customGeofences%22%3A%5B%5D%7D&stationCodes=%5B%5D&dspShortCodes=%5B%5D&flags=%7B%7D&domicileSites=%5B%5D&search=' + unitId;
+
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: fleetUrl,
+            onload: function(response) {
+                console.log('Fleet Monitoring Response received');
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(response.responseText, 'text/html');
+
+                // Log all paragraphs with the target class for debugging
+                const paragraphs = doc.querySelectorAll('p.css-lz9wxf');
+                console.log('Found paragraphs:', paragraphs.length);
+
+                let lastSite = 'Not found';
+                let lastGPS = 'Not found';
+
+                paragraphs.forEach((p, index) => {
+                    const text = p.textContent.trim();
+                    console.log(`Paragraph ${index}:`, text);
+                });
+
+                results.fleet = { lastSite, lastGPS, loading: false, rawHTML: response.responseText.substring(0, 500) };
+                updateModal(modal, unitId, results);
+            },
+            onerror: function(error) {
+                console.error('Fleet Monitoring Error:', error);
+                results.fleet = { error: 'Failed to fetch', loading: false };
+                updateModal(modal, unitId, results);
+            }
+        });
+
+        // Fetch Relay Garage data
+        const relayUrl = 'https://aap-na.corp.amazon.com/page/817ca098-8441-4329-a71e-6768f9d7e6c5?tab=Unplanned&ids=' + unitId;
+
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: relayUrl,
+            onload: function(response) {
+                console.log('Relay Garage Response received');
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(response.responseText, 'text/html');
+
+                const firstRow = doc.querySelector('tr.css-xlf10u');
+                console.log('First row found:', !!firstRow);
+
+                let status = 'No work orders found';
+
+                if (firstRow) {
+                    const statusDiv = firstRow.querySelector('div.css-2lx74p');
+                    console.log('Status div found:', !!statusDiv);
+
+                    if (statusDiv) {
+                        const spans = statusDiv.querySelectorAll('span');
+                        console.log('Spans found:', spans.length);
+                        spans.forEach((span, i) => {
+                            console.log(`Span ${i}:`, span.textContent.trim());
+                        });
+
+                        // Get the last span which typically has the status text
+                        if (spans.length > 0) {
+                            status = spans[spans.length - 1].textContent.trim();
+                        }
+                    }
+                }
+
+                results.relay = { status, loading: false };
+                updateModal(modal, unitId, results);
+            },
+            onerror: function(error) {
+                console.error('Relay Garage Error:', error);
+                results.relay = { error: 'Failed to fetch', loading: false };
+                updateModal(modal, unitId, results);
+            }
+        });
+    }
+
+    function createModal(unitId) {
+        const overlay = document.createElement('div');
+        overlay.style.position = 'fixed';
+        overlay.style.top = '0';
+        overlay.style.left = '0';
+        overlay.style.width = '100%';
+        overlay.style.height = '100%';
+        overlay.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
+        overlay.style.zIndex = '100000';
+        overlay.style.display = 'flex';
+        overlay.style.justifyContent = 'center';
+        overlay.style.alignItems = 'center';
+
+        const modal = document.createElement('div');
+        modal.style.backgroundColor = 'white';
+        modal.style.borderRadius = '8px';
+        modal.style.padding = '20px';
+        modal.style.minWidth = '500px';
+        modal.style.maxWidth = '600px';
+        modal.style.boxShadow = '0 4px 20px rgba(0,0,0,0.3)';
+        modal.style.fontFamily = 'Arial, sans-serif';
+
+        modal.innerHTML = `
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 2px solid #FF9900; padding-bottom: 10px;">
+                <h2 style="margin: 0; color: #232F3E;">Unit ${unitId} - Quick Info</h2>
+                <button id="closeModal" style="background: none; border: none; font-size: 24px; cursor: pointer; color: #666;">&times;</button>
+            </div>
+            <div id="modalContent">
+                <div style="text-align: center; padding: 20px;">
+                    <div style="border: 4px solid #FF9900; border-radius: 50%; border-top-color: transparent; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 0 auto;"></div>
+                    <p style="margin-top: 10px; color: #666;">Loading data...</p>
+                </div>
+            </div>
+        `;
+
+        const style = document.createElement('style');
+        style.textContent = `
+            @keyframes spin {
+                0% { transform: rotate(0deg); }
+                100% { transform: rotate(360deg); }
+            }
+        `;
+        document.head.appendChild(style);
+
+        overlay.appendChild(modal);
+
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay || e.target.id === 'closeModal') {
+                overlay.remove();
+            }
+        });
+
+        return overlay;
+    }
+
+    function updateModal(overlay, unitId, results) {
+        const modal = overlay.querySelector('div > div');
+        const contentDiv = modal.querySelector('#modalContent');
+
+        const allLoaded = !results.fleet.loading && !results.relay.loading;
+
+        if (allLoaded) {
+            contentDiv.innerHTML = `
+                <div style="background: #f5f5f5; padding: 15px; border-radius: 6px; margin-bottom: 15px;">
+                    <h3 style="margin: 0 0 10px 0; color: #FF9900; font-size: 16px;">📡 Fleet Monitoring</h3>
+                    ${results.fleet.error ?
+                        `<p style="color: #d13212; margin: 5px 0;">❌ ${results.fleet.error}</p>` :
+                        `
+                        <p style="margin: 5px 0;"><strong>📍 Last Known Site:</strong> ${results.fleet.lastSite}</p>
+                        <p style="margin: 5px 0;"><strong>🕐 Last GPS Time:</strong> ${results.fleet.lastGPS}</p>
+                        <details style="margin-top: 10px;">
+                            <summary style="cursor: pointer; color: #666;">Debug Info</summary>
+                            <pre style="font-size: 10px; overflow: auto; max-height: 100px;">${results.fleet.rawHTML || 'No data'}</pre>
+                        </details>
+                        `
+                    }
+                </div>
+
+                <div style="background: #f5f5f5; padding: 15px; border-radius: 6px;">
+                    <h3 style="margin: 0 0 10px 0; color: #FF9900; font-size: 16px;">🔧 Relay Garage</h3>
+                    ${results.relay.error ?
+                        `<p style="color: #d13212; margin: 5px 0;">❌ ${results.relay.error}</p>` :
+                        `<p style="margin: 5px 0;"><strong>Status:</strong> ${results.relay.status}</p>`
+                    }
+                </div>
+
+                <div style="margin-top: 15px; padding: 10px; background: #fff3cd; border-radius: 4px; font-size: 12px; color: #856404;">
+                    <strong>📝 Note:</strong> Check browser console (F12) for detailed extraction logs
+                </div>
+            `;
+        }
+    }
+})();
