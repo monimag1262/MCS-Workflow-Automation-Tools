@@ -1,0 +1,461 @@
+// ==UserScript==
+// @name         Trailer Photo Requirements Guide
+// @namespace    http://tampermonkey.net/
+// @version      12.0
+// @description  Shows required photos for trailer issues in Report Details + Dock Door inline reminder
+// @author       monimag
+// @match        https://aap-na.corp.amazon.com/*
+// @icon         https://www.google.com/s2/favicons?domain=amazon.com
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    console.log('🚛 Trailer Photo Guide: Script loaded');
+
+    function log(message, data = '') {
+        console.log(`[Trailer Guide] ${message}`, data);
+    }
+
+    function isTrailerPage() {
+        const rows = document.querySelectorAll('tr.css-xlf10u');
+        for (let row of rows) {
+            const cells = row.querySelectorAll('th, td');
+            for (let i = 0; i < cells.length - 1; i++) {
+                const headerText = cells[i].textContent.trim();
+                const valueText = cells[i + 1].textContent.trim();
+                if (headerText === 'Asset Type' && valueText === 'Trailer') {
+                    log('✅ Confirmed: Trailer page');
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    function getLastYardLocation() {
+    log('🔍 Scanning for Last Yard Location...');
+
+    // Look for the table row with "Last Yard Location" header
+    const rows = document.querySelectorAll('tr.css-xlf10u');
+    for (let row of rows) {
+        const header = row.querySelector('th.css-18tzy6q');
+        if (header && header.textContent.trim() === 'Last Yard Location') {
+            // Found the Last Yard Location row
+            // Now find the paragraph inside it (light or dark mode)
+            const lightModeP = row.querySelector('p.css-mn4iko[mdn-text]');
+            const darkModeP = row.querySelector('p.css-13rkyz8[mdn-text]');
+
+            const targetP = lightModeP || darkModeP;
+
+            if (targetP) {
+                log('✅ Last Yard Location paragraph found:', targetP.textContent);
+                return { element: targetP, text: targetP.textContent.trim() };
+            }
+        }
+    }
+
+    log('❌ No Last Yard Location detected');
+    return null;
+}
+
+function injectYardLocationReminder() {
+    if (!isTrailerPage()) {
+        log('⏭️ Not a trailer page, skipping yard location reminder');
+        return;
+    }
+
+    const locationInfo = getLastYardLocation();
+    if (!locationInfo) {
+        log('⏭️ No last yard location, skipping reminder');
+        return;
+    }
+
+    // Check if already modified
+    if (locationInfo.element.querySelector('#yard-location-reminder-text')) {
+        log('⏭️ Yard location reminder already added');
+        return;
+    }
+
+    // Create the reminder text and button
+    const reminderSpan = document.createElement('span');
+    reminderSpan.id = 'yard-location-reminder-text';
+    reminderSpan.style.cssText = `
+        color: #D84315;
+        font-weight: 700;
+        margin-left: 8px;
+    `;
+    reminderSpan.textContent = ' - VERIFY WORK REQUEST ACCURACY';
+
+    const infoButton = document.createElement('button');
+    infoButton.id = 'yard-location-info-btn';
+    infoButton.title = 'View Assignment Checklist';
+    infoButton.style.cssText = `
+        margin-left: 8px;
+        padding: 4px 10px;
+        background: #0073BB;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 12px;
+        font-weight: 700;
+        transition: all 0.2s;
+        vertical-align: middle;
+    `;
+    infoButton.textContent = 'ℹ️ Info';
+
+    infoButton.onmouseover = () => {
+        infoButton.style.background = '#005A9C';
+        infoButton.style.transform = 'scale(1.05)';
+    };
+    infoButton.onmouseout = () => {
+        infoButton.style.background = '#0073BB';
+        infoButton.style.transform = 'scale(1)';
+    };
+    infoButton.onclick = () => {
+        createInfoModal();
+    };
+
+    // Append to the last yard location paragraph
+    locationInfo.element.appendChild(reminderSpan);
+    locationInfo.element.appendChild(infoButton);
+
+    log('✅ Last Yard Location reminder and info button added inline');
+}
+
+    function createInfoModal() {
+        const modal = document.createElement('div');
+        modal.id = 'dock-door-info-modal';
+        modal.style.cssText = `
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.7);
+            z-index: 10000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        `;
+
+        const content = document.createElement('div');
+        content.style.cssText = `
+            background: white;
+            border-radius: 8px;
+            padding: 30px;
+            max-width: 600px;
+            max-height: 80vh;
+            overflow-y: auto;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        `;
+
+        content.innerHTML = `
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                <h2 style="margin: 0; color: #0F1111; font-size: 18px; font-weight: 700;">📋 Work Request Overview</h2>
+                <button id="close-info-modal" style="background: #e74c3c; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 14px;">✕ Close</button>
+            </div>
+            <div style="color: #0F1111; font-size: 14px; line-height: 1.6;">
+                <div style="background: #F7F8F8; padding: 15px; border-radius: 6px; margin-bottom: 15px;">
+                    <div style="margin-bottom: 12px; padding: 10px; background: white; border-left: 4px solid #0073BB; border-radius: 4px;">
+                        <strong>Issue Description:</strong> Clear and detailed explanation of the problem
+                    </div>
+                    <div style="margin-bottom: 12px; padding: 10px; background: white; border-left: 4px solid #0073BB; border-radius: 4px;">
+                        <strong>Photos:</strong> All required images attached (see photo requirements below)
+                    </div>
+                    <div style="padding: 10px; background: white; border-left: 4px solid #0073BB; border-radius: 4px;">
+                        <strong>Additional Notes:</strong> Any special instructions or context documented
+                    </div>
+                </div>
+                <h3 style="color: #0F1111; font-size: 16px; font-weight: 700; margin-top: 20px; margin-bottom: 10px;">📸 Photo Requirements</h3>
+                <div style="font-size: 13px; color: #565959;">
+                    <p>Required photos vary by issue type. Common requirements include:</p>
+                    <ul style="margin: 10px 0; padding-left: 20px;">
+                        <li><strong>Tires:</strong> Tread condition, damage location, leak source</li>
+                        <li><strong>Electrical:</strong> Marker Clearance, Overall damaged components (UNLESS PHYSICAL)</li>
+                        <li><strong>Body:</strong> Holes, Cracks, Overall damage areas</li>
+                        <li><strong>License Plate:</strong> Crackes, Smears, Overall damage areas</li>
+                    </ul>
+                    <p style="margin-top: 10px; font-style: arial;">Check Report Details and or Documents tab for specific photo requirements based on the reported issue. If needed photos are not there, escalate.</p>
+                </div>
+            </div>
+        `;
+
+        modal.appendChild(content);
+        document.body.appendChild(modal);
+
+        document.getElementById('close-info-modal').onclick = () => modal.remove();
+        modal.onclick = (e) => {
+            if (e.target === modal) modal.remove();
+        };
+    }
+
+    
+
+    function createPhotoGuideBox() {
+        const existing = document.getElementById('trailer-photo-guide');
+        if (existing) existing.remove();
+
+        const container = document.createElement('div');
+        container.id = 'trailer-photo-guide';
+        container.style.cssText = `
+            background: linear-gradient(135deg, #E0E0E0 0%, #BDBDBD 100%);
+            border: 1px solid #9E9E9E;
+            border-radius: 4px;
+            padding: 20px;
+            margin: 20px 0;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.15), 0 1px 3px rgba(0,0,0,0.1);
+            font-family: 'Amazon Ember', Arial, sans-serif;
+            position: relative;
+            transform: rotate(-0.5deg);
+        `;
+
+        // Sticky note tape effect at top
+        const tape = document.createElement('div');
+        tape.style.cssText = `
+            position: absolute;
+            top: -10px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 80px;
+            height: 20px;
+            background: rgba(255,255,255,0.4);
+            border: 1px solid rgba(0,0,0,0.15);
+            border-radius: 2px;
+        `;
+        container.appendChild(tape);
+
+        // Header section
+        const header = document.createElement('div');
+        header.style.cssText = `
+            color: #212121;
+            font-size: 16px;
+            font-weight: 700;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding-bottom: 12px;
+            border-bottom: 2px solid #757575;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        `;
+        header.innerHTML = `PHOTO CHECKLIST`;
+        container.appendChild(header);
+
+        // Main content box
+        const contentBox = document.createElement('div');
+        contentBox.style.cssText = `
+            background: rgba(255,255,255,0.6);
+            padding: 12px;
+            border-radius: 4px;
+            color: #212121;
+            margin-bottom: 15px;
+            border-left: 3px solid #757575;
+            font-size: 13px;
+        `;
+
+        contentBox.innerHTML = `
+
+            <strong>TIRE ISSUES</strong><br>
+            • Worn/Low Tread → Photo of tire tread WITH DEPTH GAUGE (except if cupping mentioned)<br>
+            • Cosmetic/Broken/Cracked → Photo of damage (deferrable if no belts/body ply exposed)<br>
+            • Leaking/Flat/Underinflated → Photo of tire (no depth gauge needed)<br>
+            • Chunks/Chunking → Photo required (deferrable unless belts/ply showing OR 3+ chunks OR chunk larger than 3x5 badge)<br>
+            • Flat Spots → Photo WITH DEPTH GAUGE (deferrable if 2/32 or greater, unless 2+ flat spots)<br><br>
+
+            <strong>ELECTRICAL (7-WAY)</strong><br>
+            • Dim/Inoperable Lights → Photo of defective light(s) AND 7-way tester connected to POWER UNIT (except ABS/ATIS issues)<br>
+            • Broken/Cracked/Damaged Lights → Photo of damage (no tester needed)<br><br>
+
+            <strong>BODY ISSUES</strong><br>
+            • Hole Present → Photo of hole<br>
+            • Body Damage → Photo of damaged section<br>
+            • Side Panel cuts &lt;18in OR holes &lt;3x5in → Deferrable (cancel)<br><br>
+
+            <strong>LICENSE PLATE</strong><br>
+            • BROKEN/CRAKCKED → Photo of damage<br>
+            • SMEARED/CAN'T READ → Photo of the unreadable plate (If can be cleaned then cancel-deferable)<br>
+        `;
+
+        container.appendChild(contentBox);
+
+        // Embedded full guide (collapsed by default)
+        const fullGuideContainer = document.createElement('div');
+        fullGuideContainer.id = 'full-guide-container';
+        fullGuideContainer.style.cssText = `
+            display: none;
+            background: rgba(255,255,255,0.7);
+            border: 2px solid #757575;
+            border-radius: 4px;
+            padding: 16px;
+            margin-top: 15px;
+            max-height: 400px;
+            overflow-y: auto;
+        `;
+
+        fullGuideContainer.innerHTML = `
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; padding-bottom: 10px; border-bottom: 2px solid #757575;">
+                <h2 style="margin: 0; color: #212121; font-size: 15px; font-weight: 700; text-transform: uppercase;">Complete Photo Guide</h2>
+                <button id="close-full-guide" style="background: #616161; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-weight: 700; font-size: 11px; box-shadow: 0 2px 4px rgba(0,0,0,0.2);">✕ Close</button>
+            </div>
+            <h3 style="color: #212121; margin-top: 20px; margin-bottom: 12px; text-transform: uppercase; border-bottom: 2px solid #757575; padding-bottom: 4px; font-size: 12px; font-weight: 700; letter-spacing: 0.5px;">TIRES</h3>
+            <div style="background: rgba(255,255,255,0.5); padding: 12px; margin-bottom: 10px; border-left: 4px solid #555; border-radius: 4px;">
+                <div style="font-weight: 700; color: #212121; margin-bottom: 6px; font-size: 12px;">TIRE - Worn/Low Tread</div>
+                <div style="color: #1B5E20; margin-bottom: 4px; font-size: 11px;">✓ NEED: Photo of tire tread WITH DEPTH GAUGE</div>
+                <div style="color: #B71C1C; font-size: 10px; margin-bottom: 4px; font-style: italic;">⚠ NOT needed if "cupping" is mentioned</div>
+                <div style="color: #616161; font-size: 9px; font-style: italic;">Keywords: worn out, low tread, worn, tread</div>
+            </div>
+            <div style="background: rgba(255,255,255,0.5); padding: 12px; margin-bottom: 10px; border-left: 4px solid #555; border-radius: 4px;">
+                <div style="font-weight: 700; color: #212121; margin-bottom: 6px; font-size: 12px;">TIRE - Cosmetic/Broken/Cracked</div>
+                <div style="color: #1B5E20; margin-bottom: 4px; font-size: 11px;">✓ NEED: Photo of damage</div>
+                <div style="color: #B71C1C; font-size: 10px; margin-bottom: 4px; font-style: italic;">⚠ Deferrable if no belts/body ply exposed</div>
+                <div style="color: #616161; font-size: 9px; font-style: italic;">Keywords: cosmetic damage, broken, cracked</div>
+            </div>
+            <div style="background: rgba(255,255,255,0.5); padding: 12px; margin-bottom: 10px; border-left: 4px solid #555; border-radius: 4px;">
+                <div style="font-weight: 700; color: #212121; margin-bottom: 6px; font-size: 12px;">TIRE - Leaking/Flat/Underinflated</div>
+                <div style="color: #1B5E20; margin-bottom: 4px; font-size: 11px;">✓ NEED: Photo of tire</div>
+                <div style="color: #616161; font-size: 10px; margin-bottom: 4px; font-style: italic;">ℹ No depth gauge needed</div>
+                <div style="color: #616161; font-size: 9px; font-style: italic;">Keywords: leaking, leak, flat, underinflated</div>
+            </div>
+
+            <h3 style="color: #212121; margin-top: 20px; margin-bottom: 12px; text-transform: uppercase; border-bottom: 2px solid #757575; padding-bottom: 4px; font-size: 12px; font-weight: 700; letter-spacing: 0.5px;">ELECTRICAL</h3>
+            <div style="background: rgba(255,255,255,0.5); padding: 12px; margin-bottom: 10px; border-left: 4px solid #555; border-radius: 4px;">
+                <div style="font-weight: 700; color: #212121; margin-bottom: 6px; font-size: 12px;">ELECTRICAL - Dim/Inoperable Lights</div>
+                <div style="color: #1B5E20; margin-bottom: 4px; font-size: 11px;">✓ NEED: Photo of defective light(s) AND 7-way tester connected to POWER UNIT</div>
+                <div style="color: #B71C1C; font-size: 10px; margin-bottom: 4px; font-style: italic;">⚠ Except ABS/ATIS issues</div>
+                <div style="color: #616161; font-size: 9px; font-style: italic;">Keywords: dim, inoperable, marker clearance</div>
+            </div>
+            <div style="background: rgba(255,255,255,0.5); padding: 12px; margin-bottom: 10px; border-left: 4px solid #555; border-radius: 4px;">
+                <div style="font-weight: 700; color: #212121; margin-bottom: 6px; font-size: 12px;">ELECTRICAL - Broken/Cracked/Damaged</div>
+                <div style="color: #1B5E20; margin-bottom: 4px; font-size: 11px;">✓ NEED: Photo of damage</div>
+                <div style="color: #616161; font-size: 10px; margin-bottom: 4px; font-style: italic;">ℹ No tester needed</div>
+                <div style="color: #616161; font-size: 9px; font-style: italic;">Keywords: 7-way, electrical, wiring, broken, cracked</div>
+            </div>
+
+            <h3 style="color: #212121; margin-top: 20px; margin-bottom: 12px; text-transform: uppercase; border-bottom: 2px solid #757575; padding-bottom: 4px; font-size: 12px; font-weight: 700; letter-spacing: 0.5px;">BODY</h3>
+            <div style="background: rgba(255,255,255,0.5); padding: 12px; margin-bottom: 10px; border-left: 4px solid #555; border-radius: 4px;">
+                <div style="font-weight: 700; color: #212121; margin-bottom: 6px; font-size: 12px;">BODY - Hole Present</div>
+                <div style="color: #1B5E20; margin-bottom: 4px; font-size: 11px;">✓ NEED: Photo of hole</div>
+                <div style="color: #616161; font-size: 10px; margin-bottom: 4px; font-style: italic;">ℹ None</div>
+                <div style="color: #616161; font-size: 9px; font-style: italic;">Keywords: hole</div>
+            </div>
+            <div style="background: rgba(255,255,255,0.5); padding: 12px; margin-bottom: 10px; border-left: 4px solid #555; border-radius: 4px;">
+                <div style="font-weight: 700; color: #212121; margin-bottom: 6px; font-size: 12px;">BODY - Overall Damage</div>
+                <div style="color: #1B5E20; margin-bottom: 4px; font-size: 11px;">✓ NEED: Photo of body damage</div>
+                <div style="color: #616161; font-size: 10px; margin-bottom: 4px; font-style: italic;">ℹ Side panel cuts <18in OR holes <3x5in are deferrable</div>
+                <div style="color: #616161; font-size: 9px; font-style: italic;">Keywords: body damage, bodily damage, dent, scratch</div>
+            </div>
+        `;
+
+        container.appendChild(fullGuideContainer);
+
+
+
+        // Close button handler for embedded guide
+        setTimeout(() => {
+            const closeBtn = document.getElementById('close-full-guide');
+            if (closeBtn) {
+                closeBtn.onmouseover = () => {
+                    closeBtn.style.background = '#424242';
+                    closeBtn.style.transform = 'scale(1.05)';
+                };
+                closeBtn.onmouseout = () => {
+                    closeBtn.style.background = '#616161';
+                    closeBtn.style.transform = 'scale(1)';
+                };
+                closeBtn.onclick = () => {
+                    document.getElementById('full-guide-container').style.display = 'none';
+                    document.getElementById('toggle-full-guide').textContent = '📋 Show Detailed Guide';
+                };
+            }
+        }, 100);
+
+        return container;
+    }
+
+    function injectPhotoGuide() {
+        if (!isTrailerPage()) {
+            log('⏭️ Not a trailer page, skipping photo guide');
+            return;
+        }
+
+        const guideBox = createPhotoGuideBox();
+
+        // Find the comments container (both light and dark mode)
+        const commentsContainers = [
+            document.querySelector('.css-brpadm'), // Dark mode
+            document.querySelector('.css-1tpip35') // Light mode
+        ];
+
+        const commentsContainer = commentsContainers.find(c => c !== null);
+
+        if (commentsContainer) {
+            // Insert directly after the comments container
+            commentsContainer.parentNode.insertBefore(guideBox, commentsContainer.nextSibling);
+            log('✅ Injected BELOW Comments section');
+            return;
+        }
+
+        // Fallback: try to find Comments section by header
+        const commentsHeaders = [
+            ...document.querySelectorAll('h2.css-1qhg9w9'),
+            ...document.querySelectorAll('h2.css-615kon')
+        ];
+
+        const commentsHeader = commentsHeaders.find(h =>
+            h.textContent.trim() === 'Comments'
+        );
+
+        if (commentsHeader) {
+            const container = commentsHeader.closest('.css-7pr6kr, .css-ntd8uw');
+            if (container) {
+                container.appendChild(guideBox);
+                log('✅ Injected at end of Comments container');
+                return;
+            }
+        }
+
+        log('⚠️ Could not find comments container');
+    }
+
+    const observer = new MutationObserver((mutations) => {
+        for (let mutation of mutations) {
+            if (mutation.addedNodes.length) {
+                const modal = document.querySelector('.css-1tqc01x');
+                if (modal && !document.getElementById('trailer-photo-guide')) {
+                    log('🔍 Report Details modal detected');
+                    setTimeout(injectPhotoGuide, 800);
+                }
+            }
+        }
+    });
+
+   const pageObserver = new MutationObserver((mutations) => {
+    for (let mutation of mutations) {
+        if (mutation.addedNodes.length) {
+            // Check for Last Yard Location to add inline reminder
+            const locationInfo = getLastYardLocation();
+            if (locationInfo && !document.getElementById('yard-location-reminder-text')) {
+                log('🔍 Last Yard Location detected');
+                setTimeout(injectYardLocationReminder, 500);
+            }
+        }
+    }
+});
+
+observer.observe(document.body, {
+    childList: true,
+    subtree: true
+});
+
+pageObserver.observe(document.body, {
+    childList: true,
+    subtree: true
+});
+
+log('👀 Monitoring for Report Details modal and Last Yard Location...');
+})();
