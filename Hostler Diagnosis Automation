@@ -1,0 +1,1219 @@
+Problem:
+When a Hostler issue came in, you had to manually read through the issue details and figure out whether the unit was eligible to drive on an open defect or if it needed to stay marked as unavailable. This took time and left room for inconsistent decisions.
+
+Solution:
+I built a script that automatically reads the issue text, identifies keywords, and determines the correct status — drive-eligible or unavailable.
+
+Impact:
+Faster decision-making
+More consistent outcomes
+Less mental effort on repetitive diagnosis
+
+// ==UserScript==
+// @name         DooD Eligibility Checker (Hostler)
+// @namespace    http://tampermonkey.net/
+// @version      1.5
+// @description  DooD eligibility guidance - Reads Report Details OR Issue Details
+// @author       monimag
+// @match        https://aap-na.corp.amazon.com/*
+// @icon         https://www.google.com/s2/favicons?domain=amazon.com
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // ═══════════════════════════════════════════════════════════════
+    // 🎯 HELPER FUNCTIONS
+    // ═══════════════════════════════════════════════════════════════
+
+    function containsAllKeywords(text, keywords) {
+        const lowerText = text.toLowerCase();
+        return keywords.every(keyword => lowerText.includes(keyword.toLowerCase()));
+    }
+
+    function containsAnyKeyword(text, keywords) {
+        const lowerText = text.toLowerCase();
+        return keywords.some(keyword => lowerText.includes(keyword.toLowerCase()));
+    }
+
+    function containsNoneOfKeywords(text, keywords) {
+        const lowerText = text.toLowerCase();
+        return !keywords.some(keyword => lowerText.includes(keyword.toLowerCase()));
+    }
+
+    function isDarkMode() {
+        const body = document.body;
+        const bgColor = window.getComputedStyle(body).backgroundColor;
+        const rgb = bgColor.match(/\d+/g);
+        if (rgb) {
+            const brightness = (parseInt(rgb[0]) + parseInt(rgb[1]) + parseInt(rgb[2])) / 3;
+            return brightness < 128;
+        }
+        return document.documentElement.classList.contains('dark') ||
+               document.body.classList.contains('dark') ||
+               document.querySelector('[data-theme="dark"]') !== null;
+    }
+
+    function sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 🗑️ GARBAGE TEXT PATTERNS TO FILTER OUT
+    // ═══════════════════════════════════════════════════════════════
+
+    const GARBAGE_PATTERNS = [
+        /^dark mode$/i, /^light mode$/i, /^contact us$/i, /^not available$/i,
+        /^unassigned$/i, /^internal only$/i, /^other\/not listed$/i, /^other\/not$/i,
+        /^\d+\s*\/\s*\d+$/, /^\d+ hours? (and \d+ minutes?)?$/i, /^\d+ minutes?$/i,
+        /^\d+ days?$/i, /^location:\s*\w+$/i, /^condition:\s*\w+$/i,
+        /^-?\d+\.\d+,\s*-?\d+\.\d+$/, /^[A-Z]{3,4}\d+$/, /^amz-[a-z0-9]+$/i,
+        /^pdi$/i, /^n\/a$/i, /^none$/i, /^null$/i, /^undefined$/i, /^\d+$/,
+        /^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d/i, /ago\)?$/i,
+        /^driver-/i, /^[A-Z_]+-[A-Z_]+$/, /^\(.*ago\)$/i, /^-\d{2}:\d{2}$/,
+        /^no comments added$/i, /^document type:/i, /^condition:/i, /^download$/i,
+        /^asset$/i, /^report section$/i, /^issue details$/i, /^areas of concern$/i,
+        /^work request details$/i, /^asset details$/i, /^hostler$/i,
+    ];
+
+    function isGarbageText(text) {
+        const trimmed = text.trim();
+        if (trimmed.length < 3 || trimmed.length > 500) return true;
+        for (let pattern of GARBAGE_PATTERNS) {
+            if (pattern.test(trimmed)) return true;
+        }
+        if (/^[\d\s\-\.,\/\(\)]+$/.test(trimmed)) return true;
+        return false;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 🚨 CRITICAL REJECTS (Must check FIRST - highest priority)
+    // ═══════════════════════════════════════════════════════════════
+
+    const CRITICAL_REJECTS = [
+        // Engine/Powertrain Issues
+        { pattern: "won't start", reason: "Engine won't start - unit inoperable" },
+        { pattern: "won't start", reason: "won't start" },
+        { pattern: "Fell off", reason: "Fell off" },
+        { pattern: "leaking air", reason: "leaking air" },
+        { pattern: "wont start", reason: "Engine won't start - unit inoperable" },
+        { pattern: "will not start", reason: "Engine won't start - unit inoperable" },
+        { pattern: "not starting", reason: "Engine not starting - unit inoperable" },
+        { pattern: "no start", reason: "Engine no start - unit inoperable" },
+        { pattern: "check indicator on", reason: "Engine check light ON - unknown fault requires diagnostic" },
+        { pattern: "check engine", reason: "Check engine light - requires diagnostic" },
+        { pattern: "engine light", reason: "Engine warning light - requires diagnostic" },
+        { pattern: "engine warning", reason: "Engine warning - requires diagnostic" },
+
+        // 🔴 DOOR SECURITY - CRITICAL REJECT (FIXED)
+        { keywords: ["door"], anyOf: ["not secure", "unable to secure", "won't secure", "wont secure", "cannot secure", "can't secure", "not securing"],
+          exclude: ["rusty", "minor damage", "cosmetic"],
+          reason: "Door not secure - unit cannot be used" },
+
+        // Electrical System Faults with Red Indicator
+        { keywords: ["pigtail"], anyOf: ["red indicator", "indicator showing", "problems with"], reason: "Red indicator light ON - system fault detected (fire/short risk)" },
+        { keywords: ["electrical"], anyOf: ["red indicator", "indicator light", "warning light"], reason: "Electrical system fault indicator - unknown extent of damage" },
+        { keywords: ["7 way", "7-way"], anyOf: ["red indicator", "indicator showing", "fault"], reason: "7-way connector fault indicator - system-level issue" },
+
+        // Safety-Critical Systems
+        { pattern: "no brakes", reason: "No brakes - safety critical" },
+        { pattern: "brakes not working", reason: "Brakes not working - safety critical" },
+        { pattern: "brake failure", reason: "Brake failure - safety critical" },
+        { pattern: "steering failure", reason: "Steering failure - safety critical" },
+        { pattern: "no steering", reason: "No steering - safety critical" },
+        { pattern: "transmission failure", reason: "Transmission failure - unit inoperable" },
+        { pattern: "won't move", reason: "Unit won't move - inoperable" },
+        { pattern: "wont move", reason: "Unit won't move - inoperable" }
+    ];
+
+    // ═══════════════════════════════════════════════════════════════
+    // ✅ SIMPLE APPROVE PATTERNS (Enhanced with training data)
+    // ═══════════════════════════════════════════════════════════════
+
+    const SIMPLE_APPROVES = [
+        // Door/Lock Issues - ONLY COSMETIC (REMOVED "unable to secure")
+        { pattern: "door lock is not working", category: "Body", description: "Door lock not working - user discretion for comfort" },
+        { pattern: "door lock not working", category: "Body", description: "Door lock not working - user discretion" },
+        { pattern: "door won't lock", category: "Body", description: "Door won't lock - user discretion" },
+        { pattern: "door wont lock", category: "Body", description: "Door won't lock - user discretion" },
+        { pattern: "door lock broken", category: "Body", description: "Door lock broken - user discretion" },
+
+        // HVAC/Climate Control (User discretion)
+        { pattern: "vents", category: "Defrost Heater", description: "Vents issue - user discretion" },
+        { pattern: "knobs for ac", category: "Defrost Heater", description: "AC/Heat knobs - user discretion" },
+        { pattern: "knobs for heat", category: "Defrost Heater", description: "AC/Heat knobs - user discretion" },
+        { pattern: "blower for ac", category: "Defrost Heater", description: "HVAC blower - daytime/moderate weather only" },
+        { pattern: "blower for heater", category: "Defrost Heater", description: "HVAC blower - daytime/moderate weather only" },
+        { pattern: "blower is not blowing", category: "Defrost Heater", description: "Blower not working - moderate weather only" },
+        { pattern: "mirror defrost not working", category: "Mirrors", description: "Mirror defrost - comfort feature, user discretion" },
+        { pattern: "defrost not working", category: "Defrost Heater", description: "Defrost - moderate weather/daytime only" },
+        { pattern: "defroster not working", category: "Defrost Heater", description: "Defroster - moderate weather/daytime only" },
+        { pattern: "controls not working", category: "Defrost Heater", description: "HVAC controls - user discretion" },
+
+        // Lights - Non-Critical
+        { keywords: ["rear side marker"], anyOf: ["not lighting", "not working"], category: "Lights", description: "Rear side marker lights - daytime only, user discretion" },
+        { keywords: ["clearance"], anyOf: ["not working", "won't work", "wont work"], category: "Lights", description: "Clearance lights - daytime only" },
+        { keywords: ["marker"], anyOf: ["not working", "out", "dim"], category: "Lights", description: "Marker lights - daytime only" },
+        { keywords: ["turn signal"], anyOf: ["not activating", "not working"], exclude: ["all", "both"], category: "Lights", description: "Turn signal - daytime only (if not all out)" },
+        { pattern: "only turning on the left turn signal", category: "Lights", description: "Partial turn signal function - daytime only" },
+        { keywords: ["brake"], anyOf: ["light", "lights"], anyOf2: ["not working", "out"], category: "Lights", description: "Brake lights - daytime only with DVIR documentation" },
+        { pattern: "no auxiliary light", category: "Lights", description: "Auxiliary lights - daytime only" },
+
+        // Tires
+        { keywords: ["need", "tires"], exclude: ["exposed", "cord", "belt", "ply", "wire", "steel", "bald"], category: "Tires", description: "Tires need replacement - if >4/32 tread, no exposed cords" },
+        { keywords: ["tire"], anyOf: ["uneven", "low tread"], exclude: ["exposed", "cord", "belt", "ply", "bald"], category: "Tires", description: "Uneven/low tread - if >4/32, no exposed cords/belts" },
+
+        // Windshield Wipers
+        { keywords: ["wiper", "wipers"], anyOf: ["not working", "worn"], category: "Windshield Wipers", description: "Wipers not working/worn - clear/dry weather only" },
+
+        // Seatbelts/Seats
+        { pattern: "seatbelt", category: "Body", description: "Seatbelt issue - user discretion" },
+        { pattern: "seat", category: "Body", description: "Seat issue - user discretion" },
+
+        // 12V Charger/USB
+        { pattern: "charger doesn't work", category: "Other", description: "12V charger not working" },
+        { pattern: "charger doesnt work", category: "Other", description: "12V charger not working" },
+        { pattern: "charger not working", category: "Other", description: "12V charger not working" },
+        { pattern: "usb not working", category: "Other", description: "USB not working" },
+        { pattern: "usb port broken", category: "Other", description: "USB port broken" },
+
+        // Fire Extinguisher/Safety Equipment Brackets
+        { pattern: "fire extinguisher bracket", category: "Body", description: "Fire extinguisher bracket issue" },
+        { pattern: "fire extingusher bracket", category: "Body", description: "Fire extinguisher bracket issue" },
+        { pattern: "first aid kit bracket", category: "Body", description: "First aid kit bracket issue" },
+        { pattern: "triangle holder", category: "Body", description: "Triangle holder issue" },
+
+        // Cup Holder
+        { pattern: "cup holder missing", category: "Body", description: "Cup holder missing" },
+        { pattern: "cup holder broken", category: "Body", description: "Cup holder broken" },
+        { pattern: "cupholder missing", category: "Body", description: "Cup holder missing" },
+        { pattern: "cupholder broken", category: "Body", description: "Cup holder broken" },
+
+        // ABS Light (brakes still work)
+        { pattern: "abs light on", category: "Brake Service", description: "ABS light illuminated (brakes still functional)" },
+        { pattern: "abs light is on", category: "Brake Service", description: "ABS light illuminated (brakes still functional)" },
+
+        // Mudflaps
+        { pattern: "mudflap torn", category: "Mudflap", description: "Mudflap torn" },
+        { pattern: "mudflap ripped", category: "Mudflap", description: "Mudflap ripped" },
+        { pattern: "mudflap missing", category: "Mudflap", description: "Mudflap missing" },
+        { pattern: "mud flap torn", category: "Mudflap", description: "Mudflap torn" },
+        { pattern: "mud flap missing", category: "Mudflap", description: "Mudflap missing" },
+
+        // Mirrors - Minor Cracks
+        { pattern: "mirror cracked", category: "Mirrors", description: "Mirror cracked (if visibility OK)" },
+        { pattern: "small crack in mirror", category: "Mirrors", description: "Small mirror crack" },
+        { pattern: "minor crack mirror", category: "Mirrors", description: "Minor mirror crack" },
+
+        // Battery Terminal Corrosion (starts fine)
+        { pattern: "terminal corrosion", category: "Battery", description: "Battery terminal corrosion (starts fine)" },
+        { pattern: "corroded terminal", category: "Battery", description: "Battery terminal corrosion (starts fine)" },
+        { pattern: "battery corrosion", category: "Battery", description: "Battery terminal corrosion (starts fine)" },
+
+        // Washer Reservoir Cap
+        { pattern: "reservoir cap", category: "Windshield Wipers", description: "Washer reservoir cap issue" },
+        { pattern: "washer cap missing", category: "Windshield Wipers", description: "Washer cap missing" },
+        { pattern: "wiper fluid cap", category: "Windshield Wipers", description: "Wiper fluid cap issue" },
+
+        // Dipstick
+        { pattern: "dipstick missing", category: "Transmission", description: "Dipstick missing" },
+        { pattern: "dip stick missing", category: "Transmission", description: "Dipstick missing" },
+
+        // Fifth Wheel Grease
+        { pattern: "grease needed", category: "Fifth Wheel", description: "Fifth wheel needs grease" },
+        { pattern: "needs grease", category: "Fifth Wheel", description: "Needs grease" },
+        { pattern: "low grease", category: "Fifth Wheel", description: "Low grease" },
+        { pattern: "fifth wheel grease", category: "Fifth Wheel", description: "Fifth wheel grease issue" },
+
+        // Cosmetic Damage
+        { pattern: "surface rust", category: "Wheels and Rims", description: "Surface rust" },
+        { pattern: "minor rust", category: "Body", description: "Minor rust" },
+        { pattern: "cosmetic damage", category: "Body", description: "Cosmetic damage" },
+        { pattern: "paint damage", category: "Body", description: "Paint damage" },
+        { pattern: "paint chipping", category: "Body", description: "Paint chipping" },
+        { pattern: "small dent", category: "Body", description: "Small dent" },
+        { pattern: "minor dent", category: "Body", description: "Minor dent" },
+
+        // Non-Critical Lights
+        { pattern: "spotlight not working", category: "Lights", description: "Spotlight not working" },
+        { pattern: "dome light", category: "Lights", description: "Dome light issue" },
+        { pattern: "interior light", category: "Lights", description: "Interior light issue" },
+        { pattern: "cab light out", category: "Lights", description: "Cab light out" },
+
+        // Window Latch
+        { pattern: "window latch", category: "Windows", description: "Window latch issue" },
+        { pattern: "window lock broken", category: "Windows", description: "Window lock broken" },
+
+        // Seats
+        { pattern: "seat torn", category: "Body", description: "Seat torn" },
+        { pattern: "seat ripped", category: "Body", description: "Seat ripped" },
+        { pattern: "trainer seat", category: "Body", description: "Trainer seat issue" },
+
+        // Drive Belt
+        { pattern: "drive belt worn", category: "Air Compressor", description: "Drive belt worn" },
+        { pattern: "drive belt loose", category: "Air Compressor", description: "Drive belt loose" },
+        { pattern: "mounting bracket", category: "Air Compressor", description: "Mounting bracket issue" },
+
+        // Radio/Bluetooth
+        { pattern: "radio not working", category: "Other", description: "Radio not working" },
+        { pattern: "radio broken", category: "Other", description: "Radio broken" },
+        { pattern: "bluetooth not working", category: "Other", description: "Bluetooth not working" }
+    ];
+
+    // ═══════════════════════════════════════════════════════════════
+    // 🚨 SIMPLE REJECT PATTERNS
+    // ═══════════════════════════════════════════════════════════════
+
+    const SIMPLE_REJECTS = [
+        "leaking", "leak", "leaks",
+        "dead battery", "battery dead", "inoperative gauges", "gauges inoperative",
+        "malfunctioning", "malfunction", "failure", "failed", "broken down",
+        "out of service", "oos", "unsafe", "dangerous", "fire", "smoke", "burning",
+        "flames", "wires visible", "wires exposed", "exposed wires", "visible wires",
+        "ecm won't boot", "ecm will not boot", "ecm not booting"
+    ];
+
+    // ═══════════════════════════════════════════════════════════════
+    // 🚨 SAFETY-CRITICAL KEYWORDS
+    // ═══════════════════════════════════════════════════════════════
+
+    const SAFETY_KEYWORDS = [
+        { anyOf: ["electrical", "electric", "wiring", "wire", "wires"], anyOf2: ["malfunction", "malfunctioning", "failure", "failed", "visible", "exposed", "damaged", "fire", "smoke", "burning", "melted", "short", "showing"] },
+        { keywords: ["engine"], anyOf: ["failure", "seized", "not running", "dead", "knock", "blown", "overheating", "overheat", "smoking"] },
+        { keywords: ["ecm"], anyOf: ["not boot", "won't boot", "wont boot", "failure", "failed", "not working", "will not boot"] },
+        { keywords: ["transmission"], anyOf: ["failure", "won't move", "wont move", "no gears", "slipping badly", "not moving"] },
+        { anyOf: ["starter"], anyOf2: ["won't", "wont", "not turning", "failure", "failed", "dead", "will not"] },
+        { keywords: ["gauges"], anyOf: ["inoperative", "not working", "dead", "blank", "all out"] },
+        { keywords: ["steering"], anyOf: ["failure", "not working", "locked", "no power", "hard to turn", "very loose", "play", "malfunction", "gone", "out"] },
+        { keywords: ["tie rod"], anyOf: ["broken", "loose", "damaged", "bent", "separated"] },
+        { keywords: ["power steering"], anyOf: ["failure", "leak", "not working", "gone", "out", "no power"] },
+        { keywords: ["brake"], anyOf: ["failure", "malfunction", "no brakes", "won't stop", "wont stop", "not working", "gone", "out", "not stopping"] },
+        { anyOf: ["air leak", "air leaking", "losing air", "lose air", "leaking air", "lost air pressure"] },
+        { keywords: ["brake"], keywords2: ["leak"] },
+        { keywords: ["no", "air", "pressure"] },
+        { keywords: ["losing", "air", "pressure"] },
+        { anyOf: ["tire", "tyre"], anyOf2: ["puncture", "blowout", "blow out", "flat", "nail", "screw", "hole"] },
+        { anyOf: ["cord", "belt", "ply", "wire", "steel"], anyOf2: ["exposed", "showing", "visible"] },
+        { keywords: ["bald"], anyOf: ["tire", "tyre", "tires", "tyres"] },
+        { anyOf: ["fifth wheel", "5th wheel"], anyOf2: ["released", "won’t attach to the kingpin", "not locked", "won't lock", "wont lock", "came loose", "open", "not latching"] },
+        { keywords: ["kingpin"], anyOf: ["released", "not locked", "damaged", "bent"] },
+        { keywords: ["trailer"], anyOf2: ["no lights", "lights not working", "lights out", "all lights out"] },
+        { keywords: ["horn"], anyOf: ["not working", "inoperative", "broken", "doesn't work", "doesnt work", "dead", "out"] },
+        { anyOf: ["strobe", "beacon"], anyOf2: ["not working", "inoperative", "out", "broken"] },
+        { keywords: ["alarm"], anyOf: ["not working", "inoperative", "broken", "dead"] },
+        { anyOf: ["fire", "smoke", "burning", "flames", "burnt", "burned", "melting", "melted", "smoking"] }
+    ];
+
+    // ═══════════════════════════════════════════════════════════════
+    // 🎯 DETAILED DOOD CRITERIA DATABASE
+    // ═══════════════════════════════════════════════════════════════
+
+    const DOOD_CRITERIA = {
+        "Air Compressor": {
+            eligible: [
+                { anyOf: ["mounting", "bracket"], anyOf2: ["damaged", "broken", "bent", "cracked", "loose", "missing", "needs"], exclude: ["leak", "air leak"], description: "Mounting bracket issue" },
+                { anyOf: ["drive belt", "belt"], anyOf2: ["damaged", "missing", "worn", "cracked", "frayed", "loose", "needs"], exclude: ["leak"], description: "Drive belt issue" },
+                { anyOf: ["air compressor", "compressor"], anyOf2: ["rusty", "rust", "corroded", "corrosion", "surface rust"], exclude: ["leak", "leaking"], description: "Compressor rust (not leaking)" }
+            ],
+            notEligible: [
+                { anyOf: ["not building pressure", "won't build pressure", "wont build pressure", "no pressure", "low pressure", "losing pressure"], description: "Pressure issues" },
+                { anyOf: ["oil leak", "leaking oil", "oil leaking"], description: "Oil leak" },
+                { anyOf: ["air leak", "leaking air", "air leaking"], description: "Air leak" }
+            ]
+        },
+        "Air Lines": {
+            eligible: [{ anyOf: ["air line", "air hose", "airline", "airhose"], anyOf2: ["cracked", "worn", "weathered", "dry rot", "kinked", "pinched"], exclude: ["leak", "leaking", "audible"], description: "Air lines worn (no leak)" }],
+            notEligible: [{ anyOf: ["air line", "air hose", "airline"], keywords: ["leak"], description: "Air line leaking" }, { keywords: ["audible", "leak"], description: "Audible leak" }]
+        },
+        "Battery": {
+            eligible: [{ anyOf: ["terminal", "terminals", "battery"], anyOf2: ["corrosion", "corroded", "corrosive", "buildup", "build-up", "dirty"], exclude: ["won't start", "wont start", "no start", "not starting", "dead", "weak", "low voltage"], description: "Terminal corrosion (starts fine)" }],
+            notEligible: [{ anyOf: ["low voltage", "won't hold charge", "wont hold charge", "not holding charge", "dead battery", "battery dead", "weak battery"], description: "Battery power issue" }, { keywords: ["won't start"], description: "Won't start" }, { keywords: ["wont start"], description: "Won't start" }, { keywords: ["no start"], description: "No start" }]
+        },
+        "Body": {
+            eligible: [
+                // 🔴 DOOR - ONLY COSMETIC DAMAGE ALLOWED (FIXED)
+                { anyOf: ["door"], anyOf2: ["rusty", "minor damage", "rust", "dent", "scratch"],
+                  exclude: ["not secure", "unable to secure", "won't secure", "wont secure", "cannot secure", "can't secure", "won't close", "wont close", "stuck open", "operation", "lighting", "equipment"],
+                  description: "Door cosmetic damage only (Cab category: rusty or minor damage that does NOT impact operation)" },
+
+                { anyOf: ["fire extinguisher", "fire extingusher", "extinguisher", "fire ext"], anyOf2: ["bracket", "holder", "mount", "missing", "replace", "need", "needs", "broken", "damaged"], description: "Fire extinguisher bracket issue" },
+                { anyOf: ["first aid", "firstaid", "triangle"], anyOf2: ["bracket", "holder", "mount", "missing", "broken", "damaged"], description: "Safety equipment bracket issue" },
+                { anyOf: ["cup holder", "cupholder"], anyOf2: ["missing", "broken", "damaged", "cracked"], description: "Cup holder issue" },
+                { anyOf: ["cab", "body", "panel", "fender", "hood"], anyOf2: ["rust", "rusty", "corrosion", "surface rust", "minor rust"], exclude: ["hole", "through", "structural", "frame", "door"], description: "Minor body rust (not door)" },
+                { anyOf: ["Charging port", "body", "panel", "fender", "hood"], anyOf2: ["rust", "rusty", "corrosion", "surface rust", "for phone doesn’t work", "minor rust"], exclude: ["hole", "through", "structural", "frame", "door"], description: "Minor body rust (not door)" },
+                { anyOf: ["cab", "body", "panel", "fender", "bumper", "hood"], anyOf2: ["dent", "dented", "ding", "dinged", "scratch", "scratched", "scuff", "minor damage"], exclude: ["structural", "frame", "unsafe", "large", "major", "severe", "door"], description: "Minor body dent/scratch (not door)" },
+                { keywords: ["paint"], anyOf: ["damage", "chipping", "fading", "peeling", "scratched", "bare metal", "faded", "chipped"], description: "Paint damage" },
+                { anyOf: ["splashguard", "splash guard", "fender liner"], anyOf2: ["missing", "torn", "damaged", "ripped", "cracked"], exclude: ["loose", "dragging", "hanging"], description: "Splashguard issue" },
+                { anyOf: ["dashboard", "dash"], anyOf2: ["cracked", "damaged", "broken", "scratched"], exclude: ["unsafe", "loose", "falling"], description: "Dashboard cosmetic damage" },
+                { anyOf: ["trainer seat", "passenger seat", "jump seat", "seat", "seatbelt"], anyOf2: ["damaged", "torn", "ripped", "worn", "stained"], exclude: ["unsafe", "loose", "not secured", "broken frame"], description: "Seat/seatbelt cosmetic damage - user discretion" },
+                { anyOf: ["tool box", "toolbox", "storage"], anyOf2: ["damaged", "dented", "scratched", "latch"], exclude: ["missing", "open"], description: "Toolbox cosmetic damage" }
+            ],
+            notEligible: [
+                { keywords: ["frame"], anyOf: ["cracked", "crack", "broken", "structural", "damage", "bent"], description: "Frame damage" },
+                { anyOf: ["step", "steps", "handrail"], anyOf2: ["broken", "loose", "missing", "bent", "unsafe"], description: "Steps/handrails unsafe" },
+                { keywords: ["door"], anyOf: ["won't close", "wont close", "won't open", "wont open", "stuck", "falls open"], description: "Door malfunction" },
+                { keywords: ["fuel tank"], anyOf: ["damaged", "leak", "loose", "puncture"], description: "Fuel tank issue" },
+                { keywords: ["exhaust"], anyOf: ["damaged", "leak", "broken", "loose", "hole"], description: "Exhaust issue" }
+            ]
+        },
+        "Brace Accessories": {
+            eligible: [{ anyOf: ["bendix", "brake knob grip", "knob grip", "knob cover"], anyOf2: ["missing", "worn", "cracked", "damaged", "faded", "loose", "needs"], exclude: ["brake not working", "won't engage", "wont engage"], description: "Bendix grip/knob cover issue" }],
+            notEligible: [{ keywords: ["air brake"], anyOf: ["not working", "broken", "won't engage", "wont engage", "stuck"], description: "Air brake malfunction" }]
+        },
+        "Brake Service": {
+            eligible: [{ keywords: ["abs"], anyOf: ["light", "lamp", "indicator", "warning"], anyOf2: ["on", "illuminated", "lit", "active", "showing"], exclude: ["malfunction", "failure", "failed", "low pressure", "leak", "not stopping"], description: "ABS light on (brakes working)" }],
+            notEligible: [{ anyOf: ["brake", "braking"], anyOf2: ["malfunction", "failure", "not working", "won't stop", "wont stop", "gone"], description: "Brake malfunction" }, { anyOf: ["brake pressure", "air pressure"], anyOf2: ["low", "no", "losing", "dropping"], description: "Brake pressure issue" }, { anyOf: ["brake", "braking"], keywords: ["leak"], description: "Brake leak" }]
+        },
+        "Coupling Device": {
+            eligible: [{ anyOf: ["rear dolly", "dolly glad hand", "rear glad hand"], anyOf2: ["bent", "damaged", "cracked", "worn"], exclude: ["leak", "losing air", "air loss", "red indicator"], description: "Rear dolly glad hands (no air loss, no red indicator)" }],
+            notEligible: [
+                { anyOf: ["fifth wheel", "5th wheel"], anyOf2: ["not locking", "won't lock", "wont lock", "released", "loose"], description: "Fifth wheel locking issue" },
+                { anyOf: ["glad hand", "gladhand", "pigtail"], keywords: ["leak"], description: "Glad hand leak" },
+                { anyOf: ["pigtail", "pig tail", "7 way", "7-way"], anyOf2: ["red indicator", "indicator showing", "problems with"], description: "Red indicator ON - system fault" }
+            ]
+        },
+        "Defrost Heater": {
+            eligible: [
+                { anyOf: ["cabin air filter", "cabin filter", "air filter", "hvac filter"], anyOf2: ["missing", "damaged", "dirty", "needs replacement", "replace", "clogged", "needs"], description: "Cabin air filter issue" },
+                { anyOf: ["hvac", "heater", "ac", "a/c", "climate", "heat", "vent", "vents"], anyOf2: ["knob", "control", "switch", "dial", "button"], anyOf3: ["missing", "damaged", "cracked", "broken", "loose", "hard to turn"], exclude: ["not working", "no heat", "no defrost", "won't turn on", "no ac", "no air"], description: "HVAC control cosmetic damage - user discretion" },
+                { anyOf: ["blower"], anyOf2: ["not blowing", "not working"], description: "Blower not working - moderate weather/daytime only" },
+                { anyOf: ["defrost", "defroster"], anyOf2: ["not working"], description: "Defrost not working - moderate weather only" }
+            ],
+            notEligible: [
+                { anyOf: ["heat", "heater"], anyOf2: ["not working", "no heat", "cold", "broken", "inoperative"], keywords: ["extreme", "freezing", "winter"], description: "Heater not working in extreme weather" }
+            ]
+        },
+        "Fifth Wheel": {
+            eligible: [{ anyOf: ["fifth wheel", "5th wheel"], anyOf2: ["grease", "lube", "lubrication"], anyOf3: ["low", "needs", "requires", "add", "additional", "dry", "needed"], exclude: ["no grease"], description: "Fifth wheel needs grease" }, { anyOf: ["grease", "lube"], anyOf2: ["needed", "needs", "low", "add", "required"], description: "Needs grease" }],
+            notEligible: [{ anyOf: ["fifth wheel", "5th wheel"], anyOf2: ["no grease", "completely dry", "won't lock", "wont lock", "not locking"], description: "Fifth wheel issue" }]
+        },
+        "Lights": {
+            eligible: [
+                { anyOf: ["roof", "spotlight", "spot light", "roof light", "dome light", "cab light", "interior light", "work light", "worklight"], anyOf2: ["cracked", "not working", "non-working", "inoperative", "out", "broken", "dim"], exclude: ["loose", "hanging", "falling", "missing", "headlight", "tail", "brake", "turn", "all lights"], description: "Non-critical light issue" },
+                { anyOf: ["rear side marker", "side marker", "marker", "clearance"], anyOf2: ["not lighting", "not working", "out", "dim", "wont work"], description: "Marker/clearance lights - daytime only" },
+                { anyOf: ["turn signal"], anyOf2: ["not activating", "not working", "only left", "only right"], exclude: ["all", "both", "none"], description: "Partial turn signal - daytime only" },
+                { anyOf: ["brake light", "brake lights"], anyOf2: ["not working", "out"], description: "Brake lights - daytime only with DVIR" },
+                { anyOf: ["auxiliary light", "auxiliary"], anyOf2: ["not working", "no"], description: "Auxiliary lights - daytime only" }
+            ],
+            notEligible: [
+                { anyOf: ["headlight", "head light"], anyOf2: ["not working", "out", "both out", "broken", "inoperative"], description: "Headlight out" },
+                { anyOf: ["tail light", "taillight"], anyOf2: ["not working", "out", "broken", "inoperative", "both"], description: "Tail light out" },
+                { anyOf: ["turn signal"], anyOf2: ["all", "both", "none", "not working"], keywords: ["all", "both"], description: "All turn signals out" },
+                { anyOf: ["hazard", "4-way", "four way"], anyOf2: ["not working", "out", "broken", "inoperative"], description: "Hazards out" },
+                { keywords: ["trailer"], anyOf2: ["no lights", "lights not working", "lights out", "all lights out"], description: "Trailer lights out" }
+            ]
+        },
+        "Mirrors": {
+            eligible: [
+                { anyOf: ["mirror", "mirrors", "convex", "side mirror"], anyOf2: ["minor crack", "small crack", "hairline", "cracked", "chip", "chipped"], exclude: ["visibility", "can't see", "cant see", "obstructed", "loose", "missing", "shattered", "broken off", "falling", "large crack", "major crack"], description: "Minor mirror crack" },
+                { anyOf: ["mirror adjustment", "mirror switch", "adjustment switch", "mirror defrost", "mirror controls"], anyOf2: ["not working", "broken", "damaged", "stuck"], description: "Mirror adjustment/defrost - comfort feature" }
+            ],
+            notEligible: [
+                { anyOf: ["mirror", "mirrors"], anyOf2: ["loose", "vibrating", "shaking", "wobbling"], description: "Loose mirror" },
+                { anyOf: ["mirror", "mirrors"], anyOf2: ["missing", "gone", "broken off", "fell off", "shattered"], description: "Missing/shattered mirror" },
+                { anyOf: ["can't see", "cant see", "visibility", "obstructed"], keywords: ["mirror"], description: "Mirror visibility issue" }
+            ]
+        },
+        "Mudflap": {
+            eligible: [
+                { anyOf: ["mudflap", "mud flap", "mudflaps", "mud flaps"], anyOf2: ["torn", "ripped", "damaged", "cracked", "brittle", "worn", "chunk missing", "piece missing", "missing"], exclude: ["loose", "dragging", "detach", "falling", "hanging"], description: "Mudflap damaged/missing" },
+                { anyOf: ["mudflap bracket", "mud flap bracket", "flap bracket"], anyOf2: ["bent", "damaged", "cracked"], exclude: ["loose", "detach", "falling"], description: "Mudflap bracket issue" }
+            ],
+            notEligible: [{ anyOf: ["mudflap", "mud flap"], anyOf2: ["loose", "hanging", "dragging", "about to fall"], description: "Mudflap loose/dragging" }]
+        },
+        "Tires": {
+            eligible: [
+                { anyOf: ["tire", "tires", "tread"], anyOf2: ["uneven wear", "uneven", "cupping", "feathering", "wear pattern", "wearing", "need", "needs replacement"], exclude: ["bald", "cord", "belt", "ply", "exposed", "flat", "puncture", "nail", "screw", "wire", "steel"], description: "Uneven tire wear or needs replacement - if >4/32 tread, no exposed cords" },
+                { anyOf: ["retread", "recap"], anyOf2: ["minor separation", "flaking", "small separation", "edge lifting"], exclude: ["major", "severe", "detach", "coming off", "peeling off", "chunk"], description: "Minor retread issue" }
+            ],
+            notEligible: [
+                { anyOf: ["tire", "tires"], anyOf2: ["flat", "puncture", "nail", "screw", "hole", "blowout"], description: "Tire puncture/flat" },
+                { anyOf: ["cord", "belt", "ply", "wire", "steel"], anyOf2: ["exposed", "showing", "visible"], description: "Exposed cords/belts" },
+                { anyOf: ["tire", "tires"], anyOf2: ["bald", "no tread", "slick"], description: "Bald tire" }
+            ]
+        },
+        "Transmission": {
+            eligible: [{ anyOf: ["transmission", "trans"], anyOf2: ["dipstick", "dip stick", "dip-stick"], anyOf3: ["missing", "damaged", "broken", "cracked", "bent", "hard to read"], description: "Transmission dipstick issue" }],
+            notEligible: [{ keywords: ["transmission"], anyOf: ["slipping", "grinding", "won't shift", "wont shift", "hard to shift", "stuck", "no gears", "leak"], description: "Transmission malfunction" }]
+        },
+        "Wheels and Rims": {
+            eligible: [
+                { anyOf: ["rim", "rims", "wheel", "wheels"], anyOf2: ["rust", "rusty", "surface rust", "light rust", "minor rust", "corrosion"], exclude: ["excessive", "severe", "hole", "crack", "bent", "rusted through"], description: "Minor wheel rust" },
+                { anyOf: ["rim", "rims", "wheel", "wheels"], anyOf2: ["cosmetic", "scratch", "scratched", "scuff", "scuffed", "curb rash", "paint"], exclude: ["crack", "bent", "structural"], description: "Cosmetic wheel damage" }
+            ],
+            notEligible: [
+                { anyOf: ["rim", "wheel"], anyOf2: ["cracked", "crack", "bent", "damaged", "broken"], description: "Wheel/rim damage" },
+                { anyOf: ["lug nut", "lug nuts"], anyOf2: ["loose", "missing"], description: "Lug nut issue" },
+                { anyOf: ["bearing", "hub"], anyOf2: ["noise", "play", "loose", "bad", "grinding", "hot"], description: "Bearing/hub issue" }
+            ]
+        },
+        "Windows": {
+            eligible: [{ anyOf: ["window", "windows"], anyOf2: ["latch", "lock", "handle"], anyOf3: ["missing", "damaged", "broken", "stuck", "hard to turn", "loose"], exclude: ["won't close", "wont close", "won't stay closed", "security", "falls open"], description: "Window latch/handle issue" }],
+            notEligible: [
+                { anyOf: ["window", "windshield"], anyOf2: ["cracked", "broken", "shattered", "smashed"], description: "Window glass damage" },
+                { keywords: ["window"], anyOf: ["won't open", "wont open", "won't close", "wont close", "stuck closed", "stuck open"], description: "Window malfunction" }
+            ]
+        },
+        "Windshield Wipers": {
+            eligible: [
+                { anyOf: ["reservoir", "washer fluid", "washer", "wiper fluid"], anyOf2: ["cap"], anyOf3: ["missing", "damaged", "broken", "cracked", "loose", "won't stay on"], description: "Washer reservoir cap issue" },
+                { anyOf: ["cap"], anyOf2: ["missing", "damaged", "broken", "lost"], anyOf3: ["reservoir", "washer", "wiper", "fluid"], description: "Washer cap issue" },
+                { anyOf: ["wiper", "wipers", "windshield wiper"], anyOf2: ["not working", "worn"], description: "Wipers not working/worn - clear/dry weather only" }
+            ],
+            notEligible: [
+                { anyOf: ["wiper", "wipers"], anyOf2: ["not working", "won't work", "wont work", "inoperative", "dead", "stopped"], keywords: ["rain", "weather", "wet"], description: "Wipers not working in bad weather" }
+            ]
+        },
+        "Other": {
+            eligible: [
+                { anyOf: ["12v", "12 volt", "charger", "charging port", "power port", "accessory port", "cigarette lighter", "power outlet"], anyOf2: ["not working", "doesn't work", "doesnt work", "non-working", "dead", "no power", "broken", "inoperative"], description: "12V charger/port not working" },
+                { anyOf: ["charger", "charging"], anyOf2: ["doesn't work", "doesnt work", "not working", "broken", "dead", "inoperative"], description: "Charger not working" },
+                { anyOf: ["usb", "usb port"], anyOf2: ["not working", "broken", "dead"], description: "USB port not working" },
+                { anyOf: ["radio", "stereo", "cb"], anyOf2: ["not working", "broken", "dead", "no sound"], description: "Radio not working" },
+                { anyOf: ["netradyne", "camera", "dashcam", "dash cam"], anyOf2: ["not working", "broken", "offline", "error"], description: "Camera system not working" }
+            ],
+            notEligible: [{ anyOf: ["electrical", "wiring"], anyOf2: ["fire", "smoke", "burning", "melted", "short"], description: "Electrical fire/short" }]
+        }
+    };
+
+    // ═══════════════════════════════════════════════════════════════
+    // 🔍 PAGE DETECTION & EXTRACTION
+    // ═══════════════════════════════════════════════════════════════
+
+    function isHostlerPage() {
+        console.log('🔍 Checking if this is a Hostler page...');
+        const rows = document.querySelectorAll('tr.css-xlf10u');
+        for (let row of rows) {
+            const cells = row.querySelectorAll('th, td');
+            for (let i = 0; i < cells.length - 1; i++) {
+                const headerText = cells[i].textContent.trim();
+                const valueText = cells[i + 1].textContent.trim();
+                if (headerText === 'Asset Type' && valueText === 'Hostler') {
+                    console.log('✅ Confirmed: This is a Hostler page (found in table)');
+                    return true;
+                }
+            }
+        }
+        const pageText = document.body.textContent;
+        if (pageText.includes('Asset Type') && pageText.includes('Hostler')) {
+            const assetTypeIndex = pageText.indexOf('Asset Type');
+            const hostlerIndex = pageText.indexOf('Hostler', assetTypeIndex);
+            if (hostlerIndex - assetTypeIndex < 200) {
+                console.log('✅ Confirmed: This is a Hostler page (found via text search)');
+                return true;
+            }
+        }
+        console.log('❌ Not a Hostler page');
+        return false;
+    }
+
+    function findReportDetailsButton() {
+        const buttons = document.querySelectorAll('button[data-mdn-interactive]');
+        for (let button of buttons) {
+            if (button.textContent.trim() === 'Report Details') {
+                console.log('✅ Found Report Details button');
+                return button;
+            }
+        }
+        console.log('⚠️ Report Details button not found');
+        return null;
+    }
+
+    function extractIssueDetailsFromPage() {
+        console.log('🔍 Attempting to extract Issue Details from page...');
+        const foundTexts = [];
+
+        // Method 1: Look for "Issue Details" header in table rows
+        const allRows = document.querySelectorAll('tr.css-xlf10u');
+        for (let i = 0; i < allRows.length; i++) {
+            const row = allRows[i];
+            const header = row.querySelector('th.css-149auxl h3.css-4cfsxr');
+            if (header && header.textContent.trim() === 'Issue Details') {
+                console.log('📋 Found Issue Details header (Method 1)');
+                const nextRow = allRows[i + 1];
+                if (nextRow) {
+                    const issueCell = nextRow.querySelector('td.css-18tzy6q[colspan="4"]');
+                    if (issueCell) {
+                        const spans = issueCell.querySelectorAll('span');
+                        if (spans.length > 0) {
+                            spans.forEach(span => {
+                                const issueText = span.textContent.trim();
+                                if (issueText && issueText.length > 3 && !isGarbageText(issueText)) {
+                                    console.log('✅ Found issue text in span:', issueText);
+                                    foundTexts.push(issueText);
+                                }
+                            });
+                        } else {
+                            const issueText = issueCell.textContent.trim();
+                            if (issueText && issueText.length > 3 && !isGarbageText(issueText)) {
+                                console.log('✅Found issue text:', issueText);
+                                foundTexts.push(issueText);
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+        }
+
+        // Method 2: Look for td with colspan="4" that contains issue text
+        if (foundTexts.length === 0) {
+            console.log('⚠️ Method 1 failed, trying Method 2...');
+            const allCells = document.querySelectorAll('td.css-18tzy6q[colspan="4"]');
+            for (let cell of allCells) {
+                const spans = cell.querySelectorAll('span');
+                if (spans.length > 0) {
+                    spans.forEach(span => {
+                        const text = span.textContent.trim();
+                        if (text && text.length > 5 && !isGarbageText(text)) {
+                            // Check if this looks like an issue description
+                            if (!text.match(/^\d+\/\d+$/) && !text.includes('Areas of Concern')) {
+                                console.log('✅ Found potential issue text (Method 2):', text);
+                                foundTexts.push(text);
+                            }
+                        }
+                    });
+                } else {
+                    const text = cell.textContent.trim();
+                    if (text && text.length > 5 && !isGarbageText(text)) {
+                        if (!text.match(/^\d+\/\d+$/) && !text.includes('Areas of Concern')) {
+                            console.log('✅ Found potential issue text (Method 2):', text);
+                            foundTexts.push(text);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Method 3: Look backwards from "Areas of Concern"
+        if (foundTexts.length === 0) {
+            console.log('⚠️ Method 2 failed, trying Method 3...');
+            for (let i = 0; i < allRows.length; i++) {
+                const row = allRows[i];
+                const header = row.querySelector('h6.css-17xh5uu');
+                if (header && header.textContent.includes('Areas of Concern')) {
+                    console.log('📋 Found Areas of Concern, looking backwards for issue text');
+                    for (let j = i - 1; j >= Math.max(0, i - 5); j--) {
+                        const prevRow = allRows[j];
+                        const cell = prevRow.querySelector('td.css-18tzy6q[colspan]');
+                        if (cell) {
+                            const spans = cell.querySelectorAll('span');
+                            if (spans.length > 0) {
+                                spans.forEach(span => {
+                                    const text = span.textContent.trim();
+                                    if (text && text.length > 10 && !text.includes('Issue Details') && !isGarbageText(text)) {
+                                        console.log('✅ Found issue text before Areas of Concern (Method 3):', text);
+                                        foundTexts.push(text);
+                                    }
+                                });
+                            } else {
+                                const text = cell.textContent.trim();
+                                if (text && text.length > 10 && !text.includes('Issue Details') && !isGarbageText(text)) {
+                                    console.log('✅ Found issue text before Areas of Concern (Method 3):', text);
+                                    foundTexts.push(text);
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        if (foundTexts.length > 0) {
+            const combined = foundTexts.join(' // ');
+            console.log('📝 Combined issue text:', combined);
+            return combined;
+        }
+
+        console.log('❌ Could not find Issue Details text');
+        return '';
+    }
+
+    function getPageInfo() {
+        const pageTexts = document.querySelectorAll('p.css-13rkyz8, p.css-mn4iko, .css-gvrnls p');
+        for (let p of pageTexts) {
+            const text = p.textContent.trim();
+            const match = text.match(/^(\d+)\s*\/\s*(\d+)$/);
+            if (match) {
+                return {
+                    current: parseInt(match[1]),
+                    total: parseInt(match[2])
+                };
+            }
+        }
+        return { current: 1, total: 1 };
+    }
+
+    function findRightArrow() {
+        const buttons = document.querySelectorAll('button.css-l1to7c, button.css-1k5y1ng');
+        for (let btn of buttons) {
+            const svg = btn.querySelector('svg path');
+            if (svg) {
+                const d = svg.getAttribute('d');
+                if (d && (d.includes('M1 19') || d.includes('M1 1'))) {
+                    const allPaths = btn.querySelectorAll('svg path');
+                    for (let path of allPaths) {
+                        const pathD = path.getAttribute('d');
+                        if (pathD && pathD.includes('M1 19l9-9-9-9')) {
+                            return btn;
+                        }
+                    }
+                }
+            }
+        }
+        const allArrowButtons = document.querySelectorAll('button.css-l1to7c, button.css-1k5y1ng');
+        const arrowButtons = Array.from(allArrowButtons).filter(btn => {
+            const svg = btn.querySelector('svg');
+            return svg && (svg.getAttribute('width') === '11' || svg.getAttribute('height') === '20');
+        });
+        if (arrowButtons.length >= 2) {
+            return arrowButtons[1];
+        }
+        return null;
+    }
+
+    function extractCurrentPageComments() {
+        const comments = [];
+        const commentContainers = document.querySelectorAll('.css-1jp93ge');
+        commentContainers.forEach(container => {
+            const contentDivs = container.querySelectorAll('.css-163ns6o');
+            contentDivs.forEach((div) => {
+                const hasUsername = div.querySelector('.css-1ndm675, p[class*="css-8m5i1g"]');
+                if (hasUsername) return;
+                const textElements = div.querySelectorAll('p.css-13rkyz8, p.css-mn4iko');
+                textElements.forEach(p => {
+                    const text = p.textContent.trim();
+                    if (text && !isGarbageText(text)) comments.push(text);
+                });
+            });
+        });
+        const commentsSection = document.querySelector('.css-1h7paie, .css-brpadm');
+        if (commentsSection) {
+            const allText = commentsSection.querySelectorAll('p.css-13rkyz8, p.css-mn4iko');
+            allText.forEach(p => {
+                const text = p.textContent.trim();
+                if (text && !isGarbageText(text) && !comments.includes(text)) {
+                    comments.push(text);
+                }
+            });
+        }
+        return comments;
+    }
+
+    async function extractAllCommentsFromModal() {
+        console.log('🔄 Starting multi-page comment extraction...');
+        const allComments = [];
+        await sleep(800);
+        let pageInfo = getPageInfo();
+        console.log(`📄 Found ${pageInfo.total} page(s) in modal`);
+        let currentComments = extractCurrentPageComments();
+        allComments.push(...currentComments);
+        console.log(`📝 Page 1: Found ${currentComments.length} comment(s)`);
+        if (pageInfo.total > 1) {
+            for (let i = 2; i <= pageInfo.total; i++) {
+                const rightArrow = findRightArrow();
+                if (rightArrow) {
+                    console.log(`➡️ Navigating to page ${i}...`);
+                    rightArrow.click();
+                    await sleep(1000);
+                    currentComments = extractCurrentPageComments();
+                    allComments.push(...currentComments);
+                    console.log(`📝 Page ${i}: Found ${currentComments.length} comment(s)`);
+                } else {
+                    console.log(`⚠️ Could not find right arrow for page ${i}`);
+                    break;
+                }
+            }
+        }
+        const uniqueComments = [...new Set(allComments)];
+        console.log(`✅ Total unique comments extracted: ${uniqueComments.length}`);
+        return uniqueComments.join(' // ');
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 🧠 ENHANCED ANALYSIS ENGINE
+    // ═══════════════════════════════════════════════════════════════
+
+    function matchesCriteria(text, criteria) {
+        const lowerText = text.toLowerCase();
+        if (criteria.keywords && !containsAllKeywords(lowerText, criteria.keywords)) return false;
+        if (criteria.keywords2 && !containsAllKeywords(lowerText, criteria.keywords2)) return false;
+        if (criteria.anyOf && !containsAnyKeyword(lowerText, criteria.anyOf)) return false;
+        if (criteria.anyOf2 && !containsAnyKeyword(lowerText, criteria.anyOf2)) return false;
+        if (criteria.anyOf3 && !containsAnyKeyword(lowerText, criteria.anyOf3)) return false;
+        if (criteria.exclude && !containsNoneOfKeywords(lowerText, criteria.exclude)) return false;
+        return true;
+    }
+
+    function checkCriticalRejects(text) {
+        const lowerText = text.toLowerCase();
+        for (let reject of CRITICAL_REJECTS) {
+            if (reject.pattern && lowerText.includes(reject.pattern.toLowerCase())) {
+                return { isReject: true, reason: reject.reason };
+            }
+            if (reject.keywords || reject.anyOf) {
+                if (matchesCriteria(text, reject)) {
+                    return { isReject: true, reason: reject.reason };
+                }
+            }
+        }
+        return { isReject: false };
+    }
+
+    function checkSimpleApproves(text) {
+        const lowerText = text.toLowerCase();
+        for (let approve of SIMPLE_APPROVES) {
+            if (approve.pattern && lowerText.includes(approve.pattern.toLowerCase())) {
+                return { isApprove: true, category: approve.category, description: approve.description };
+            }
+            if (approve.keywords || approve.anyOf) {
+                if (matchesCriteria(text, approve)) {
+                    return { isApprove: true, category: approve.category, description: approve.description };
+                }
+            }
+        }
+        return { isApprove: false };
+    }
+
+    function checkSimpleRejects(text) {
+        const lowerText = text.toLowerCase();
+        for (let reject of SIMPLE_REJECTS) {
+            if (lowerText.includes(reject.toLowerCase())) {
+                return { isReject: true, reason: `Detected: "${reject}"` };
+            }
+        }
+        return { isReject: false };
+    }
+
+    function checkSafetyKeywords(text) {
+        for (let safety of SAFETY_KEYWORDS) {
+            if (matchesCriteria(text, safety)) {
+                let matchedTerms = [];
+                if (safety.keywords) matchedTerms.push(...safety.keywords);
+                if (safety.anyOf) matchedTerms.push(`[${safety.anyOf.join('/')}]`);
+                if (safety.anyOf2) matchedTerms.push(`[${safety.anyOf2.join('/')}]`);
+                return { isSafety: true, matchedTerms: matchedTerms.join(' + ') };
+            }
+        }
+        return { isSafety: false };
+    }
+
+    function analyzeDooD(issueText) {
+        const criticalReject = checkCriticalRejects(issueText);
+        if (criticalReject.isReject) return { eligible: false, reason: criticalReject.reason, component: 'Critical Safety Risk' };
+        const simpleApprove = checkSimpleApproves(issueText);
+        if (simpleApprove.isApprove) return { eligible: true, reason: simpleApprove.description, component: simpleApprove.category };
+        const simpleReject = checkSimpleRejects(issueText);
+        if (simpleReject.isReject) return { eligible: false, reason: simpleReject.reason, component: 'Safety Risk' };
+        const safetyCheck = checkSafetyKeywords(issueText);
+        if (safetyCheck.isSafety) return { eligible: false, reason: `Safety issue: ${safetyCheck.matchedTerms}`, component: 'Safety Risk' };
+        for (let [component, rules] of Object.entries(DOOD_CRITERIA)) {
+            if (rules.notEligible) {
+                for (let criteria of rules.notEligible) {
+                    if (matchesCriteria(issueText, criteria)) return { eligible: false, reason: criteria.description, component: component };
+                }
+            }
+            if (rules.eligible) {
+                for (let criteria of rules.eligible) {
+                    if (matchesCriteria(issueText, criteria)) return { eligible: true, reason: criteria.description, component: component };
+                }
+            }
+        }
+        return { eligible: null, reason: 'No matching criteria - manual review needed', component: 'Unknown' };
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 🎨 CREATE RESULT BOX
+    // ═══════════════════════════════════════════════════════════════
+
+    function createResultBox(result, issueText, pagesScanned = 1, source = 'modal') {
+        const dark = isDarkMode();
+        let statusColor, statusIcon, statusText, bgColor, textColor, borderColor;
+        if (result.eligible === true) {
+            statusColor = '#38a169';
+            statusIcon = '✅';
+            statusText = 'LIKELY ELIGIBLE';
+            bgColor = dark ? '#1a332a' : '#f0fdf4';
+            textColor = dark ? '#68d391' : '#276749';
+            borderColor = '#38a169';
+        } else if (result.eligible === false) {
+            statusColor = '#e53e3e';
+            statusIcon = '❌';
+            statusText = 'LIKELY NOT ELIGIBLE';
+            bgColor = dark ? '#3d1f1f' : '#fff5f5';
+            textColor = dark ? '#fc8181' : '#c53030';
+            borderColor = '#e53e3e';
+        } else {
+            statusColor = '#d69e2e';
+            statusIcon = '❓';
+            statusText = 'NEEDS MANUAL REVIEW';
+            bgColor = dark ? '#3d3520' : '#fffbeb';
+            textColor = dark ? '#f6e05e' : '#975a16';
+            borderColor = '#d69e2e';
+        }
+        const boxBg = dark ? '#2d3748' : '#ffffff';
+        const detailText = dark ? '#a0aec0' : '#4a5568';
+        const issueBg = dark ? '#2d3320' : '#fffbeb';
+        const issueTextColor = dark ? '#d69e2e' : '#92400e';
+        const disclaimerBg = dark ? '#1a202c' : '#e2e8f0';
+        const disclaimerText = dark ? '#718096' : '#4a5568';
+        const btnBg = dark ? '#4a5568' : '#e2e8f0';
+        const btnText = dark ? '#e2e8f0' : '#4a5568';
+        const sourceLabel = source === 'modal' ? `📄 Scanned ${pagesScanned} page(s) from Report Details` : '📄 Read from Issue Details section';
+        const container = document.createElement('div');
+        container.id = 'dood-result-container';
+        container.style.cssText = `
+            background: ${boxBg};
+            border: 3px solid ${borderColor};
+            border-radius: 12px;
+            padding: 20px;
+            margin: 16px 0;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+            max-width: 100%;
+        `;
+        container.innerHTML = `
+            <div style="display: flex; align-items: center; gap: 16px; margin-bottom: 16px;">
+                <span style="font-size: 48px; line-height: 1;">${statusIcon}</span>
+                <div>
+                    <div style="font-size: 22px; font-weight: bold; color: ${statusColor}; margin-bottom: 4px;">${statusText}</div>
+                    <div style="font-size: 16px; color: ${detailText};">${result.component}</div>
+                    <div style="font-size: 13px; color: ${detailText}; margin-top: 4px;">${sourceLabel}</div>
+                </div>
+            </div>
+            <div style="background: ${bgColor}; padding: 16px; border-radius: 8px; border-left: 4px solid ${borderColor}; margin-bottom: 16px;">
+                <div style="font-size: 18px; font-weight: bold; color: ${textColor}; margin-bottom: 8px;">
+                    ${result.eligible === true ? '✓ Likely Yes' : result.eligible === false ? '✗ Likely No' : '? Uncertain'}
+                </div>
+                <div style="font-size: 16px; color: ${textColor}; line-height: 1.5;">${result.reason}</div>
+            </div>
+            <div style="background: ${issueBg}; padding: 14px; border-radius: 8px; border-left: 4px solid #f59e0b; margin-bottom: 16px;">
+                <div style="font-size: 16px; font-weight: bold; color: ${issueTextColor}; margin-bottom: 6px;">📄 Issue Text Found:</div>
+                <div style="font-size: 15px; color: ${issueTextColor}; font-style: italic; line-height: 1.5; word-break: break-word; max-height: 150px; overflow-y: auto;">${issueText || 'No text found'}</div>
+            </div>
+            <div style="background: ${disclaimerBg}; padding: 12px; border-radius: 8px; margin-bottom: 16px;">
+                <div style="font-size: 14px; color: ${disclaimerText}; line-height: 1.5;">
+                    ⚠️ <strong>Disclaimer:</strong> This is a recommendation only. Final determination must be made by a qualified reviewer.
+                </div>
+            </div>
+            ${result.eligible ? `
+            <div style="background: ${dark ? '#1a332a' : '#e6fffa'}; padding: 14px; border-radius: 8px; border-left: 4px solid #38a169; margin-bottom: 16px;">
+                <div style="font-size: 16px; font-weight: bold; color: ${dark ? '#68d391' : '#2c7a7b'}; margin-bottom: 8px;">📋 Next Steps:</div>
+                <ol style="margin: 0; padding-left: 20px; font-size: 15px; color: ${dark ? '#68d391' : '#2c7a7b'}; line-height: 1.7;">
+                    <li>Verify issue matches DooD criteria</li>
+                    <li>Change Lifecycle State to "Active"</li>
+                    <li>Set reason to "Driving on open defect"</li>
+                    <li>Add note and assign to vendor</li>
+                </ol>
+            </div>
+            <button id="dood-copy-note-btn" style="
+                width: 100%; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white; border: none; padding: 14px; border-radius: 8px;
+                font-size: 16px; font-weight: bold; cursor: pointer; margin-bottom: 10px;
+            ">📋 Copy Note</button>
+            ` : ''}
+            <button id="dood-close-result-btn" style="
+                width: 100%; background: ${btnBg}; color: ${btnText};
+                border: none; padding: 14px; border-radius: 8px;
+                font-size: 16px; font-weight: bold; cursor: pointer;
+            ">Close</button>
+        `;
+        return container;
+    }
+
+    function setupResultEventListeners(container, result, issueText) {
+        container.querySelector('#dood-close-result-btn')?.addEventListener('click', () => container.remove());
+        if (result.eligible) {
+            container.querySelector('#dood-copy-note-btn')?.addEventListener('click', function() {
+                const noteText = `DooD Approved - ${result.component}: ${result.reason}. Issue: ${issueText}`;
+                navigator.clipboard.writeText(noteText);
+                this.textContent = '✅ Copied!';
+                this.style.background = '#38a169';
+                setTimeout(() => {
+                    this.textContent = '📋 Copy Note';
+                    this.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+                }, 2000);
+            });
+        }
+    }
+
+    function injectResultIntoModal(result, issueText, pagesScanned) {
+        const existing = document.getElementById('dood-result-container');
+        if (existing) existing.remove();
+        const resultBox = createResultBox(result, issueText, pagesScanned, 'modal');
+        const commentsSection = document.querySelector('.css-1h7paie');
+        if (commentsSection) {
+            commentsSection.appendChild(resultBox);
+        } else {
+            const commentsHeader = Array.from(document.querySelectorAll('h2')).find(h => h.textContent.trim() === 'Comments');
+            if (commentsHeader) {
+                const commentsContainer = commentsHeader.closest('.css-7pr6kr, .css-ntd8uw, div');
+                if (commentsContainer) {
+                    commentsContainer.appendChild(resultBox);
+                }
+            } else {
+                const modalContent = document.querySelector('.css-1tqc01x, .css-1ewgxx3, .css-q4yopn');
+                if (modalContent) {
+                    modalContent.appendChild(resultBox);
+                }
+            }
+        }
+        setupResultEventListeners(resultBox, result, issueText);
+        resultBox.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    function injectResultIntoPage(result, issueText) {
+        const existing = document.getElementById('dood-result-container');
+        if (existing) existing.remove();
+        const resultBox = createResultBox(result, issueText, 1, 'page');
+
+        // Try to find the best location to insert the result
+        const columns = document.querySelectorAll('.css-11odvsv');
+        let leftColumn = null;
+        for (let col of columns) {
+            const header = col.querySelector('h3.css-4cfsxr');
+            if (header && header.textContent.trim() === 'Work Request Details') {
+                leftColumn = col;
+                break;
+            }
+        }
+
+        if (leftColumn) {
+            const tables = leftColumn.querySelectorAll('.css-1kxonj9');
+            let workRequestTable = null;
+            for (let table of tables) {
+                const header = table.querySelector('h3.css-4cfsxr');
+                if (header && header.textContent.trim() === 'Work Request Details') {
+                    workRequestTable = table;
+                    break;
+                }
+            }
+            if (workRequestTable) {
+                workRequestTable.parentNode.insertBefore(resultBox, workRequestTable.nextSibling);
+            } else {
+                leftColumn.appendChild(resultBox);
+            }
+        } else {
+            const firstColumn = document.querySelector('.css-11odvsv');
+            if (firstColumn) {
+                const firstTable = firstColumn.querySelector('.css-1kxonj9');
+                if (firstTable) {
+                    firstColumn.insertBefore(resultBox, firstTable.nextSibling);
+                } else {
+                    firstColumn.appendChild(resultBox);
+                }
+            }
+        }
+
+        setupResultEventListeners(resultBox, result, issueText);
+        resultBox.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    async function runDooDChecker() {
+        console.log('🔍 Starting DooD Eligibility Check v6.1...');
+
+        if (!isHostlerPage()) {
+            alert('This does not appear to be a Hostler page.');
+            return;
+        }
+
+        const reportButton = findReportDetailsButton();
+
+        if (reportButton) {
+            console.log('📋 Found Report Details button - opening modal...');
+            reportButton.click();
+            await sleep(1200);
+            const pageInfo = getPageInfo();
+            console.log(`📄 Modal has ${pageInfo.total} page(s)`);
+            const issueText = await extractAllCommentsFromModal();
+
+            if (!issueText) {
+                alert('❌ No issue description found in Report Details.\n\nTip: Check if there are comments on any of the pages.');
+                return;
+            }
+
+            console.log('📝 Combined text from all pages:', issueText);
+            const result = analyzeDooD(issueText);
+            console.log('📊 Result:', result);
+
+            // Navigate back to page 1 if needed
+            const currentPage = getPageInfo();
+            if (currentPage.current > 1) {
+                const leftArrows = document.querySelectorAll('button.css-l1to7c, button.css-1k5y1ng');
+                for (let i = currentPage.current; i > 1; i--) {
+                    for (let btn of leftArrows) {
+                        const paths = btn.querySelectorAll('svg path');
+                        for (let path of paths) {
+                            if (path.getAttribute('d')?.includes('M10 1l-9 9 9 9')) {
+                                btn.click();
+                                await sleep(500);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            injectResultIntoModal(result, issueText, pageInfo.total);
+        } else {
+            console.log('📋 No Report Details button found - reading from Issue Details section...');
+            const issueText = extractIssueDetailsFromPage();
+
+            if (!issueText) {
+                alert('❌ No issue description found on this page.\n\nTip: Make sure the Issue Details section is visible on the page.');
+                return;
+            }
+
+            console.log('📝 Extracted from page:', issueText);
+            const result = analyzeDooD(issueText);
+            console.log('📊 Result:', result);
+
+            injectResultIntoPage(result, issueText);
+        }
+    }
+
+    function addCheckButton() {
+        console.log('🔍 DooD button script initializing...');
+
+        // Use MutationObserver to handle dynamic content
+        const observer = new MutationObserver((mutations, obs) => {
+            const areasOfConcern = Array.from(
+                document.querySelectorAll('h6')
+            ).find(h6 => h6.textContent.trim().includes('Areas of Concern'));
+
+            if (areasOfConcern) {
+                console.log('📋 Found Areas of Concern section');
+
+                const isHostler = isHostlerPage();
+                if (!isHostler) {
+                    console.log('⚠️ Not a Hostler page - button will not be added');
+                    obs.disconnect();
+                    return;
+                }
+
+                if (document.getElementById('dood-check-button')) {
+                    console.log('⚠️ Button already exists');
+                    return; // Don't disconnect - allow multiple pages
+                }
+
+                console.log('✅ All checks passed - adding button...');
+
+                const button = document.createElement('button');
+                button.id = 'dood-check-button';
+                button.textContent = '🔍 Check DooD Eligibility';
+                button.style.cssText = `
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    color: white;
+                    border: none;
+                    padding: 12px 24px;
+                    border-radius: 8px;
+                    font-size: 16px;
+                    font-weight: bold;
+                    cursor: pointer;
+                    margin: 10px 0;
+                    box-shadow: 0 3px 6px rgba(0,0,0,0.2);
+                    transition: all 0.2s;
+                    display: inline-block;
+                `;
+
+                button.addEventListener('mouseenter', () => {
+                    button.style.transform = 'translateY(-2px)';
+                    button.style.boxShadow = '0 5px 10px rgba(0,0,0,0.25)';
+                });
+
+                button.addEventListener('mouseleave', () => {
+                    button.style.transform = 'translateY(0)';
+                    button.style.boxShadow = '0 3px 6px rgba(0,0,0,0.2)';
+                });
+
+                button.addEventListener('click', runDooDChecker);
+
+                const concernRow = areasOfConcern.closest('tr');
+                if (concernRow && concernRow.nextElementSibling) {
+                    const buttonRow = document.createElement('tr');
+                    buttonRow.className = 'css-xlf10u';
+                    const buttonCell = document.createElement('td');
+                    buttonCell.className = 'css-18tzy6q';
+                    buttonCell.colSpan = 4;
+                    buttonCell.appendChild(button);
+                    buttonRow.appendChild(buttonCell);
+                    concernRow.parentNode.insertBefore(buttonRow, concernRow.nextSibling);
+                    console.log('✅ DooD Check button added successfully!');
+                } else {
+                    console.log('⚠️ Could not find proper location to insert button');
+                }
+            }
+        });
+
+        // Start observing
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true
+        });
+
+        // Also try immediate injection in case content is already loaded
+        setTimeout(() => {
+            const areasOfConcern = Array.from(
+                document.querySelectorAll('h6')
+            ).find(h6 => h6.textContent.trim().includes('Areas of Concern'));
+
+            if (areasOfConcern && !document.getElementById('dood-check-button')) {
+                const isHostler = isHostlerPage();
+                if (isHostler) {
+                    const button = document.createElement('button');
+                    button.id = 'dood-check-button';
+                    button.textContent = '🔍 Check DooD Eligibility';
+                    button.style.cssText = `
+                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                        color: white;
+                        border: none;
+                        padding: 12px 24px;
+                        border-radius: 8px;
+                        font-size: 16px;
+                        font-weight: bold;
+                        cursor: pointer;
+                        margin: 10px 0;
+                        box-shadow: 0 3px 6px rgba(0,0,0,0.2);
+                        transition: all 0.2s;
+                        display: inline-block;
+                    `;
+
+                    button.addEventListener('mouseenter', () => {
+                        button.style.transform = 'translateY(-2px)';
+                        button.style.boxShadow = '0 5px 10px rgba(0,0,0,0.25)';
+                    });
+
+                    button.addEventListener('mouseleave', () => {
+                        button.style.transform = 'translateY(0)';
+                        button.style.boxShadow = '0 3px 6px rgba(0,0,0,0.2)';
+                    });
+
+                    button.addEventListener('click', runDooDChecker);
+
+                    const concernRow = areasOfConcern.closest('tr');
+                    if (concernRow && concernRow.nextElementSibling) {
+                        const buttonRow = document.createElement('tr');
+                        buttonRow.className = 'css-xlf10u';
+                        const buttonCell = document.createElement('td');
+                        buttonCell.className = 'css-18tzy6q';
+                        buttonCell.colSpan = 4;
+                        buttonCell.appendChild(button);
+                        buttonRow.appendChild(buttonCell);
+                        concernRow.parentNode.insertBefore(buttonRow, concernRow.nextSibling);
+                        console.log('✅ DooD Check button added successfully (immediate)!');
+                    }
+                }
+            }
+        }, 1000);
+    }
+
+    // Initialize when DOM is ready
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', addCheckButton);
+    } else {
+        addCheckButton();
+    }
+
+    console.log('✅ DooD Eligibility Checker v6.1 loaded!');
+})();
