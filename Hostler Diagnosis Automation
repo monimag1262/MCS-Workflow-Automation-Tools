@@ -1,13 +1,32 @@
 Problem:
-When a Hostler issue came in, you had to manually read through the issue details and figure out whether the unit was eligible to drive on an open defect or if it needed to stay marked as unavailable. This took time and left room for inconsistent decisions.
+When a Hostler (yard truck) has a reported defect, someone has to manually determine whether it can still be used ("Driving on Open Defect" eligible) or if it must stay unavailable until repaired.
+
+Original Process Requires:
+Reading through issue details and comments (sometimes across multiple pages)
+Comparing the defect against a long, complex list of eligibility rules
+Remembering which issues are safety-critical vs. minor/cosmetic
+Making a judgment call under time pressure
+This process is slow, inconsistent, and mentally taxing — especially when handling multiple work orders.
+
 
 Solution:
 I built a script that automatically reads the issue text, identifies keywords, and determines the correct status — drive-eligible or unavailable.
 
+
+What the Script Does:
+1. Detects page type	Confirms it's a Hostler asset (not a trailer or tractor)
+2. Extracts issue text	Reads from "Report Details" modal OR "Issue Details" section — even scanning multiple comment pages
+3. Filters out noise	Ignores timestamps, system text, and other irrelevant data
+4. Analyzes against rules	Checks the text against 100+ eligibility criteria organized by component (brakes, tires, lights, body, etc.)
+5. Returns a verdict	Displays ✅ Likely Eligible, ❌ Likely Not Eligible, or ❓ Needs Manual Review
+6. Explains why	Shows the matched rule and component category
+7. Speeds up next steps	Provides a "Copy Note" button with pre-formatted text for documentation
+
 Impact:
-Faster decision-making
-More consistent outcomes
-Less mental effort on repetitive diagnosis
+Faster decisions — Seconds instead of minutes per work order
+More consistent outcomes — Same rules applied every time
+Reduced mental load — No need to memorize complex eligibility criteria
+Built-in documentation — Copy-ready notes for audit trail
 
 // ==UserScript==
 // @name         DooD Eligibility Checker (Hostler)
