@@ -8,10 +8,8 @@ Remembering which issues are safety-critical vs. minor/cosmetic
 Making a judgment call under time pressure
 This process is slow, inconsistent, and mentally taxing — especially when handling multiple work orders.
 
-
 Solution:
 I built a script that automatically reads the issue text, identifies keywords, and determines the correct status — drive-eligible or unavailable.
-
 
 What the Script Does:
 1. Detects page type	Confirms it's a Hostler asset (not a trailer or tractor)
