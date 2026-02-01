@@ -1,249 +1,695 @@
+Problem:
+When working a case or reviewing fleet data, you often need to check a unit's location across multiple systems — Fleet Monitoring, Relay Garage, and YMS. Each lookup requires navigating to a different tool and manually entering the same information.
+
+Original Process Requires:
+Copying the Unit ID from the case or table
+Opening Fleet Monitoring in a new tab
+Pasting the Unit ID into the search field
+Repeating for Relay Garage if you need work order history
+Opening YMS separately to verify if the trailer is actually at the reported location
+Manually selecting the site from a dropdown
+Typing the Unit ID into the search field
+If the site isn't in the dropdown, trying alternate sites one by one
+This is repetitive, slow, and pulls you out of your workflow constantly.
+
+Solution:
+I built a script that adds quick-action buttons and automates cross-system lookups — including auto-filling YMS with Unit ID and site code extracted from the source page.
+
+What the Script Does:
+1. Adds quick links (Paragon)	Inserts "Unit Location" and "Relay Garage" buttons that auto-populate the Unit ID
+2. Converts Yes/No to buttons (Fleet Monitoring)	Turns static "Yes/No" loaded status into clickable "Check YMS" buttons
+3. Extracts Unit ID	Reads the Unit ID from the row (via asset links or cell content)
+4. Extracts site codes	Pulls primary and alternate site codes from the row
+5. Stores values	Saves Unit ID and site codes for the next page
+6. Opens YMS	Launches YMS in a new tab
+7. Auto-fills YMS	Populates the search field and site dropdown automatically
+8. Handles fallback	If primary site isn't in the dropdown, tries alternate sites automatically
+
+Impact:
+One-click lookups — No more copy/paste/navigate/paste
+Cross-system automation — Data flows from Fleet Monitoring to YMS seamlessly
+Smarter site handling — Automatically tries alternate locations if primary fails
+Faster verification — Confirm trailer location in seconds instead of minutes
+Embedded in workflow — Buttons appear right where you're already working
+
+Script: 
 // ==UserScript==
-// @name         Paragon Unit Info Fetcherrrrrrr
+// @name         Paragon Quick Links + YMS Integration
 // @namespace    http://tampermonkey.net/
-// @version      2.1
-// @description  Fetch and display unit info from Fleet Monitoring, Relay Garage, and YMS
-// @author       You
-// @match        https://paragon-na.amazon.com/*
-// @grant        GM_xmlhttpRequest
-// @connect      aap-na.corp.amazon.com
-// @connect      trans-logistics.amazon.com
+// @version      2.3
+// @description  Add quick navigation buttons for Unit Location, Relay Garage, and YMS verification
+// @author       monimag
+// @match        https://paragon-na.amazon.com/hz/view-case?caseId=*
+// @match        https://aap-na.corp.amazon.com/page/dfd44913-d2f4-4e96-99e2-64729dbdc19a*
+// @match        https://trans-logistics.amazon.com/yms/shipclerk/*
+// @grant        GM_setValue
+// @grant        GM_getValue
 // ==/UserScript==
 
 (function() {
     'use strict';
 
-    window.addEventListener('load', function() {
-        // Create button container with single button
-        const buttonContainer = document.createElement('div');
-        buttonContainer.id = 'custom-nav-buttons';
-        buttonContainer.style.position = 'fixed';
-        buttonContainer.style.top = '10px';
-        buttonContainer.style.left = '50%';
-        buttonContainer.style.transform = 'translateX(-50%)';
-        buttonContainer.style.zIndex = '99999';
-        buttonContainer.style.padding = '10px';
-        buttonContainer.style.backgroundColor = 'rgba(255, 255, 255, 0.95)';
-        buttonContainer.style.borderRadius = '8px';
-        buttonContainer.style.boxShadow = '0 2px 10px rgba(0,0,0,0.2)';
+    // ========================================
+    // UTILITY FUNCTIONS
+    // ========================================
 
-        // Single button: Get Unit Info
-        const btnGetInfo = createButton('🔍 Get Unit Info', () => {
-            const unitId = prompt('Enter Unit ID:');
-            if (unitId) {
-                fetchUnitInfo(unitId);
+    function showToast(message, type = "info") {
+        const toast = document.createElement('div');
+        toast.textContent = message;
+
+        const colors = {
+            info: '#0073bb',
+            success: '#067d62',
+            warning: '#f08804',
+            error: '#d13212'
+        };
+
+        toast.style.cssText = `
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background-color: ${colors[type] || colors.info};
+            color: white;
+            padding: 15px 20px;
+            border-radius: 4px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.2);
+            z-index: 10000;
+            font-size: 14px;
+            font-weight: bold;
+            max-width: 300px;
+            animation: slideIn 0.3s ease-out;
+        `;
+
+        document.body.appendChild(toast);
+
+        setTimeout(() => {
+            toast.style.animation = 'slideOut 0.3s ease-out';
+            setTimeout(() => toast.remove(), 300);
+        }, 3000);
+    }
+
+    // Add animation styles
+    const style = document.createElement('style');
+    style.textContent = `
+        @keyframes slideIn {
+            from { transform: translateX(400px); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+        @keyframes slideOut {
+            from { transform: translateX(0); opacity: 1; }
+            to { transform: translateX(400px); opacity: 0; }
+        }
+    `;
+    document.head.appendChild(style);
+
+    // ========================================
+    // YMS FUNCTIONS
+    // ========================================
+
+    function isValidUnitId(text) {
+        // Remove whitespace
+        text = text.trim();
+
+        // Must be between 5-10 characters
+        if (text.length < 5 || text.length > 10) return false;
+
+        // Must contain at least one letter and one number
+        const hasLetter = /[A-Z]/i.test(text);
+        const hasNumber = /\d/.test(text);
+        if (!hasLetter || !hasNumber) return false;
+
+        // Must be alphanumeric only
+        if (!/^[A-Z0-9]+$/i.test(text)) return false;
+
+        // Exclude common non-unit-ID patterns
+        const excludePatterns = [
+            /^(YES|NO)$/i,
+            /^\d{1,2}\/\d{1,2}\/\d{2}$/,  // dates
+            /^PS\d{3}$/,  // PS codes like PS906
+            /^[A-Z]{3,5}\d{1,2}$/  // site codes like TUL5, ILG1
+        ];
+
+        for (const pattern of excludePatterns) {
+            if (pattern.test(text)) return false;
+        }
+
+        return true;
+    }
+
+    function isValidSiteCode(text) {
+        text = text.trim();
+
+        // Site codes are typically 3-5 letters followed by 0-2 digits
+        // Examples: TUL5, ILG1, XMT2, DSR4
+        if (!/^[A-Z]{3,5}\d{0,2}$/i.test(text)) return false;
+
+        // Exclude Yes/No
+        if (text === 'Yes' || text === 'No') return false;
+
+        // Must be at least 3 characters
+        if (text.length < 3) return false;
+
+        return true;
+    }
+
+    function extractUnitIdFromRow(button) {
+        const row = button.closest('tr');
+        if (!row) {
+            console.log('❌ Could not find parent row');
+            return null;
+        }
+
+        console.log('🔍 Searching for Unit ID in row...');
+
+        // Priority 1: Look for link with href="/v2/asset/" - this is most reliable
+        const assetLinks = row.querySelectorAll('a[href*="/v2/asset/"]');
+        console.log(`Found ${assetLinks.length} asset link(s)`);
+
+        for (const link of assetLinks) {
+            const text = link.textContent.trim();
+            console.log(`  Checking asset link: "${text}"`);
+
+            if (isValidUnitId(text)) {
+                console.log(`  ✅ VALID Unit ID found: ${text}`);
+                return text.toUpperCase();
             }
+        }
+
+        // Priority 2: Look in the second cell (typical position for unit ID)
+        const cells = row.querySelectorAll('td');
+        if (cells.length > 1) {
+            const secondCell = cells[1];
+            const secondCellText = secondCell.textContent.trim();
+            console.log(`  Checking 2nd cell: "${secondCellText}"`);
+
+            if (isValidUnitId(secondCellText)) {
+                console.log(`  ✅ VALID Unit ID found in 2nd cell: ${secondCellText}`);
+                return secondCellText.toUpperCase();
+            }
+        }
+
+        // Priority 3: Check all cells for any valid unit ID
+        console.log(`  Checking all ${cells.length} cells...`);
+        for (let i = 0; i < cells.length; i++) {
+            const cell = cells[i];
+            const cellText = cell.textContent.trim();
+
+            // Skip empty cells and cells with just "--"
+            if (!cellText || cellText === '--') continue;
+
+            console.log(`  Cell ${i}: "${cellText}"`);
+
+            if (isValidUnitId(cellText)) {
+                console.log(`  ✅ VALID Unit ID found in cell ${i}: ${cellText}`);
+                return cellText.toUpperCase();
+            }
+        }
+
+        console.log('❌ No valid Unit ID found in row');
+        return null;
+    }
+
+    function extractSiteCodeFromRow(button) {
+        const row = button.closest('tr');
+        if (!row) {
+            console.log('❌ Could not find parent row');
+            return [];
+        }
+
+        console.log('🔍 Searching for site codes in row...');
+
+        const siteCodes = [];
+        const cells = row.querySelectorAll('td');
+
+        // Look through all cells
+        for (let i = 0; i < cells.length; i++) {
+            const cell = cells[i];
+
+            // Check paragraphs in the cell
+            const paragraphs = cell.querySelectorAll('p');
+            for (const p of paragraphs) {
+                const text = p.textContent.trim();
+
+                // Skip empty or placeholder text
+                if (!text || text === '--') continue;
+
+                console.log(`  Cell ${i} paragraph: "${text}"`);
+
+                // Check if this contains multiple sites separated by comma
+                if (text.includes(',')) {
+                    const sites = text.split(',').map(s => s.trim());
+                    console.log(`    Found comma-separated values: ${sites.join(', ')}`);
+
+                    for (const site of sites) {
+                        if (isValidSiteCode(site)) {
+                            siteCodes.push(site.toUpperCase());
+                            console.log(`    ✅ Valid site code: ${site}`);
+                        }
+                    }
+                } else {
+                    // Single value
+                    if (isValidSiteCode(text)) {
+                        siteCodes.push(text.toUpperCase());
+                        console.log(`    ✅ Valid site code: ${text}`);
+                    }
+                }
+            }
+
+            // Also check links in the cell (some sites might be in links)
+            const links = cell.querySelectorAll('a');
+            for (const link of links) {
+                const text = link.textContent.trim();
+
+                if (!text || text === '--') continue;
+
+                if (text.includes(',')) {
+                    const sites = text.split(',').map(s => s.trim());
+                    for (const site of sites) {
+                        if (isValidSiteCode(site) && !siteCodes.includes(site.toUpperCase())) {
+                            siteCodes.push(site.toUpperCase());
+                            console.log(`    ✅ Valid site code from link: ${site}`);
+                        }
+                    }
+                } else {
+                    if (isValidSiteCode(text) && !siteCodes.includes(text.toUpperCase())) {
+                        siteCodes.push(text.toUpperCase());
+                        console.log(`    ✅ Valid site code from link: ${text}`);
+                    }
+                }
+            }
+        }
+
+        console.log(`📍 Total site codes found: ${siteCodes.length} - [${siteCodes.join(', ')}]`);
+        return siteCodes;
+    }
+
+    function handleCheckYMS(button) {
+        console.log('═══════════════════════════════════════');
+        console.log('🚀 YMS Check Started');
+        console.log('═══════════════════════════════════════');
+
+        const unitId = extractUnitIdFromRow(button);
+        const siteCodes = extractSiteCodeFromRow(button);
+
+        console.log('📊 Extraction Results:');
+        console.log(`   Unit ID: ${unitId || 'NOT FOUND'}`);
+        console.log(`   Site Codes: ${siteCodes.length > 0 ? siteCodes.join(', ') : 'NOT FOUND'}`);
+        console.log('═══════════════════════════════════════');
+
+        if (!unitId) {
+            showToast("Could not find Unit ID in this row!", "error");
+            console.error('❌ Unit ID extraction failed');
+            return;
+        }
+
+        if (!siteCodes || siteCodes.length === 0) {
+            showToast("Could not find Location Code! Opening YMS without auto-fill.", "warning");
+            GM_setValue('yms_unitId', unitId);
+            GM_setValue('yms_locationCode', '');
+            GM_setValue('yms_alternateSites', JSON.stringify([]));
+            window.open('https://trans-logistics.amazon.com/yms/shipclerk/?state=%2Fyms%2Fshipclerk%2F#/yard', '_blank');
+            return;
+        }
+
+        // Store primary site and alternates
+        const primarySite = siteCodes[0];
+        const alternateSites = siteCodes.slice(1);
+
+        GM_setValue('yms_unitId', unitId);
+        GM_setValue('yms_locationCode', primarySite);
+        GM_setValue('yms_alternateSites', JSON.stringify(alternateSites));
+
+        console.log('💾 Stored values:');
+        console.log(`   Unit ID: ${unitId}`);
+        console.log(`   Primary Site: ${primarySite}`);
+        console.log(`   Alternate Sites: ${alternateSites.join(', ') || 'none'}`);
+
+        const siteInfo = alternateSites.length > 0
+            ? `${primarySite} (${alternateSites.length} alternate${alternateSites.length > 1 ? 's' : ''})`
+            : primarySite;
+
+        showToast(`Opening YMS\nUnit: ${unitId}\nSite: ${siteInfo}`, "success");
+
+        window.open('https://trans-logistics.amazon.com/yms/shipclerk/?state=%2Fyms%2Fshipclerk%2F#/yard', '_blank');
+    }
+
+    // ========================================
+    // YMS PAGE AUTO-FILL (Angular-based)
+    // ========================================
+
+    function autoFillYMS() {
+        const unitId = GM_getValue('yms_unitId', '');
+        const locationCode = GM_getValue('yms_locationCode', '');
+        const alternateSitesJson = GM_getValue('yms_alternateSites', '[]');
+
+        let alternateSites = [];
+        try {
+            alternateSites = JSON.parse(alternateSitesJson);
+        } catch (e) {
+            console.error('Error parsing alternate sites:', e);
+        }
+
+        if (!unitId && !locationCode) {
+            console.log('No stored values for YMS auto-fill');
+            return;
+        }
+
+        console.log('YMS Auto-fill starting with:', {
+            unitId,
+            locationCode,
+            alternateSites
         });
 
-        buttonContainer.appendChild(btnGetInfo);
-        document.body.appendChild(buttonContainer);
+        let attempts = 0;
+        const maxAttempts = 20;
+        let currentSiteIndex = 0;
+        let currentSite = locationCode;
 
-        console.log('Unit Info Fetcher loaded successfully!');
-    });
+        const fillAttempt = function() {
+            attempts++;
+            console.log(`YMS Auto-fill attempt ${attempts}/${maxAttempts} with site: ${currentSite}`);
 
-    function createButton(text, onClick) {
+            const searchInput = document.getElementById('searchInput');
+            const dropdown = document.querySelector('select[ng-model="$root.selectedYardSite"]');
+
+            if (searchInput && dropdown && unitId && currentSite) {
+                console.log('✅ Found all elements, filling now...');
+
+                setTimeout(() => {
+                    // Fill search input
+                    searchInput.value = unitId;
+                    searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+                    searchInput.dispatchEvent(new Event('change', { bubbles: true }));
+                    console.log('✅ Filled search input with:', unitId);
+
+                    // Check if the site exists in dropdown
+                    const siteOption = dropdown.querySelector(`option[value="string:${currentSite}"]`);
+
+                    if (!siteOption && currentSiteIndex < alternateSites.length) {
+                        // Try alternate site
+                        console.log(`⚠️ Site ${currentSite} not found in dropdown, trying alternate...`);
+                        currentSiteIndex++;
+                        currentSite = alternateSites[currentSiteIndex - 1];
+
+                        showToast(`Primary site not available, trying: ${currentSite}`, 'warning');
+
+                        // Restart with new site
+                        attempts = 0;
+                        setTimeout(fillAttempt, 1000);
+                        return;
+                    }
+
+                    // Fill dropdown
+                    dropdown.value = 'string:' + currentSite;
+                    dropdown.dispatchEvent(new Event('change', { bubbles: true }));
+                    console.log('✅ Filled dropdown with:', currentSite);
+
+                    // Try Angular scope manipulation
+                    try {
+                        if (typeof angular !== 'undefined') {
+                            let searchScope = angular.element(searchInput).scope();
+                            let dropdownScope = angular.element(dropdown).scope();
+
+                            if (searchScope) {
+                                searchScope.$apply(function() {
+                                    searchScope.topbar.filters.searchQuery = unitId;
+                                    if (typeof searchScope.topbar.textSearch === 'function') {
+                                        searchScope.topbar.textSearch(unitId);
+                                    }
+                                });
+                                console.log('✅ Applied Angular scope for search');
+                            }
+
+                            if (dropdownScope) {
+                                dropdownScope.$apply(function() {
+                                    dropdownScope.$root.selectedYardSite = currentSite;
+                                    if (typeof dropdownScope.refreshFunction === 'function') {
+                                        dropdownScope.refreshFunction();
+                                    }
+                                });
+                                console.log('✅ Applied Angular scope for dropdown');
+                            }
+                        }
+                    } catch (e) {
+                        console.error('❌ YMS Auto-fill Angular error:', e);
+                    }
+
+                    // Clear stored values
+                    GM_setValue('yms_unitId', '');
+                    GM_setValue('yms_locationCode', '');
+                    GM_setValue('yms_alternateSites', '[]');
+                    console.log('✅ Cleared stored values');
+
+                    const usedAlternate = currentSite !== locationCode;
+                    showToast(
+                        usedAlternate
+                            ? `YMS filled with alternate site: ${currentSite}`
+                            : 'YMS fields auto-filled!',
+                        'success'
+                    );
+
+                }, 1000);
+
+                return true; // Success
+            }
+
+            if (attempts >= maxAttempts) {
+                console.log('❌ YMS Auto-fill: Timeout after ' + maxAttempts + ' attempts');
+
+                // Clear stored values even on timeout
+                GM_setValue('yms_unitId', '');
+                GM_setValue('yms_locationCode', '');
+                GM_setValue('yms_alternateSites', '[]');
+                return true; // Stop trying
+            }
+
+            // Try again
+            setTimeout(fillAttempt, 1000);
+            return false;
+        };
+
+        fillAttempt();
+    }
+
+    // ========================================
+    // CONVERT "YES/NO" TO YMS BUTTON
+    // ========================================
+
+    function convertLoadedStatusToButton() {
+        // Find all paragraphs that might contain "Yes" or "No"
+        const statusParagraphs = document.querySelectorAll('p.css-1ndm675, p.css-p6zxe3, p[mdn-text]');
+
+        for (const p of statusParagraphs) {
+            const text = p.textContent.trim();
+
+            if (text === 'Yes' || text === 'No') {
+                // Check if already converted
+                if (p.dataset.ymsConverted) continue;
+
+                // Mark as converted
+                p.dataset.ymsConverted = 'true';
+
+                // Get the parent cell
+                const cell = p.closest('td.css-18tzy6q');
+                if (!cell) continue;
+
+                // Create button
+                const button = document.createElement('button');
+                button.textContent = `${text} - Check YMS`;
+                button.style.cssText = `
+                    padding: 6px 12px;
+                    background-color: ${text === 'Yes' ? '#067d62' : '#d13212'};
+                    color: white;
+                    border: none;
+                    border-radius: 4px;
+                    font-size: 13px;
+                    font-weight: bold;
+                    cursor: pointer;
+                    transition: all 0.3s;
+                    width: 100%;
+                `;
+
+                button.addEventListener('mouseenter', function() {
+                    this.style.backgroundColor = text === 'Yes' ? '#045d47' : '#a02a0f';
+                    this.style.transform = 'scale(1.05)';
+                });
+
+                button.addEventListener('mouseleave', function() {
+                    this.style.backgroundColor = text === 'Yes' ? '#067d62' : '#d13212';
+                    this.style.transform = 'scale(1)';
+                });
+
+                button.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    console.log('🖱️ YMS button clicked');
+                    handleCheckYMS(this);
+                });
+
+                // Replace the paragraph with the button
+                p.replaceWith(button);
+                console.log(`✅ Converted "${text}" to YMS button`);
+            }
+        }
+    }
+
+    // ========================================
+    // PARAGON PAGE FUNCTIONS
+    // ========================================
+
+    function getUnitId() {
+        const bodyText = document.body.innerText;
+        const unitIdMatch = bodyText.match(/\b\d{6}\b/);
+        if (unitIdMatch) {
+            return unitIdMatch[0];
+        }
+        return prompt("Enter Unit ID (e.g., 001174):");
+    }
+
+    function createButton(text, clickHandler) {
         const button = document.createElement('button');
         button.textContent = text;
-        button.style.padding = '12px 24px';
-        button.style.backgroundColor = '#FF9900';
-        button.style.color = 'white';
-        button.style.border = 'none';
-        button.style.borderRadius = '4px';
-        button.style.cursor = 'pointer';
-        button.style.fontWeight = 'bold';
-        button.style.fontSize = '14px';
-        button.style.fontFamily = 'Arial, sans-serif';
-        button.onclick = onClick;
+        button.style.cssText = `
+            display: block;
+            width: 100%;
+            padding: 10px 15px;
+            margin: 5px 0;
+            background-color: #FF9900;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        `;
 
-        button.onmouseover = () => {
-            button.style.backgroundColor = '#EC7211';
-            button.style.transform = 'scale(1.05)';
-        };
-        button.onmouseout = () => {
-            button.style.backgroundColor = '#FF9900';
-            button.style.transform = 'scale(1)';
-        };
+        button.addEventListener('mouseenter', function() {
+            this.style.backgroundColor = '#E88B00';
+        });
+
+        button.addEventListener('mouseleave', function() {
+            this.style.backgroundColor = '#FF9900';
+        });
+
+        button.addEventListener('click', clickHandler);
 
         return button;
     }
 
-    function fetchUnitInfo(unitId) {
-        const modal = createModal(unitId);
-        document.body.appendChild(modal);
+    function insertButtons() {
+        const targetElement = document.querySelector('[data-test="render-to-child"]');
 
-        const results = {
-            fleet: { loading: true },
-            relay: { loading: true }
-        };
+        if (!targetElement) {
+            console.log('Target element not found, retrying...');
+            setTimeout(insertButtons, 1000);
+            return;
+        }
 
-        // Fetch Fleet Monitoring data
-        const fleetUrl = 'https://aap-na.corp.amazon.com/page/dfd44913-d2f4-4e96-99e2-64729dbdc19a?map-layout=SPLIT&states=%5B%7B%22state%22%3A%22ACTIVE%22%2C%22reasons%22%3A%5B%5D%7D%2C%7B%22state%22%3A%22UNAVAILABLE%22%2C%22reasons%22%3A%5B%5D%7D%5D&fields=%5B%5D&fleets=%5B%220f454f75-1e45-475f-8d8b-2334ade1f6f1%22%2C%227de393df-74e1-45af-9650-560ba008bc65%22%2C%22b84ddc20-589c-4330-af67-3d38f89e28af%22%2C%22b9e02fc4-2b9f-4a70-ac7c-76b30a33bcbe%22%2C%22ba97eda1-cb03-446e-a907-474084194777%22%2C%22daa83ad7-5d8f-43a4-ba9c-76c643e45e1e%22%5D&operationalStatuses=%5B%5D&geofences=%7B%22type%22%3A%22ANYWHERE%22%2C%22customGeofences%22%3A%5B%5D%7D&stationCodes=%5B%5D&dspShortCodes=%5B%5D&flags=%7B%7D&domicileSites=%5B%5D&search=' + unitId;
+        if (document.getElementById('custom-quick-links-container')) {
+            return;
+        }
 
-        GM_xmlhttpRequest({
-            method: 'GET',
-            url: fleetUrl,
-            onload: function(response) {
-                console.log('Fleet Monitoring Response received');
-                const parser = new DOMParser();
-                const doc = parser.parseFromString(response.responseText, 'text/html');
-
-                // Log all paragraphs with the target class for debugging
-                const paragraphs = doc.querySelectorAll('p.css-lz9wxf');
-                console.log('Found paragraphs:', paragraphs.length);
-
-                let lastSite = 'Not found';
-                let lastGPS = 'Not found';
-
-                paragraphs.forEach((p, index) => {
-                    const text = p.textContent.trim();
-                    console.log(`Paragraph ${index}:`, text);
-                });
-
-                results.fleet = { lastSite, lastGPS, loading: false, rawHTML: response.responseText.substring(0, 500) };
-                updateModal(modal, unitId, results);
-            },
-            onerror: function(error) {
-                console.error('Fleet Monitoring Error:', error);
-                results.fleet = { error: 'Failed to fetch', loading: false };
-                updateModal(modal, unitId, results);
-            }
-        });
-
-        // Fetch Relay Garage data
-        const relayUrl = 'https://aap-na.corp.amazon.com/page/817ca098-8441-4329-a71e-6768f9d7e6c5?tab=Unplanned&ids=' + unitId;
-
-        GM_xmlhttpRequest({
-            method: 'GET',
-            url: relayUrl,
-            onload: function(response) {
-                console.log('Relay Garage Response received');
-                const parser = new DOMParser();
-                const doc = parser.parseFromString(response.responseText, 'text/html');
-
-                const firstRow = doc.querySelector('tr.css-xlf10u');
-                console.log('First row found:', !!firstRow);
-
-                let status = 'No work orders found';
-
-                if (firstRow) {
-                    const statusDiv = firstRow.querySelector('div.css-2lx74p');
-                    console.log('Status div found:', !!statusDiv);
-
-                    if (statusDiv) {
-                        const spans = statusDiv.querySelectorAll('span');
-                        console.log('Spans found:', spans.length);
-                        spans.forEach((span, i) => {
-                            console.log(`Span ${i}:`, span.textContent.trim());
-                        });
-
-                        // Get the last span which typically has the status text
-                        if (spans.length > 0) {
-                            status = spans[spans.length - 1].textContent.trim();
-                        }
-                    }
-                }
-
-                results.relay = { status, loading: false };
-                updateModal(modal, unitId, results);
-            },
-            onerror: function(error) {
-                console.error('Relay Garage Error:', error);
-                results.relay = { error: 'Failed to fetch', loading: false };
-                updateModal(modal, unitId, results);
-            }
-        });
-    }
-
-    function createModal(unitId) {
-        const overlay = document.createElement('div');
-        overlay.style.position = 'fixed';
-        overlay.style.top = '0';
-        overlay.style.left = '0';
-        overlay.style.width = '100%';
-        overlay.style.height = '100%';
-        overlay.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
-        overlay.style.zIndex = '100000';
-        overlay.style.display = 'flex';
-        overlay.style.justifyContent = 'center';
-        overlay.style.alignItems = 'center';
-
-        const modal = document.createElement('div');
-        modal.style.backgroundColor = 'white';
-        modal.style.borderRadius = '8px';
-        modal.style.padding = '20px';
-        modal.style.minWidth = '500px';
-        modal.style.maxWidth = '600px';
-        modal.style.boxShadow = '0 4px 20px rgba(0,0,0,0.3)';
-        modal.style.fontFamily = 'Arial, sans-serif';
-
-        modal.innerHTML = `
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 2px solid #FF9900; padding-bottom: 10px;">
-                <h2 style="margin: 0; color: #232F3E;">Unit ${unitId} - Quick Info</h2>
-                <button id="closeModal" style="background: none; border: none; font-size: 24px; cursor: pointer; color: #666;">&times;</button>
-            </div>
-            <div id="modalContent">
-                <div style="text-align: center; padding: 20px;">
-                    <div style="border: 4px solid #FF9900; border-radius: 50%; border-top-color: transparent; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 0 auto;"></div>
-                    <p style="margin-top: 10px; color: #666;">Loading data...</p>
-                </div>
-            </div>
+        const buttonContainer = document.createElement('div');
+        buttonContainer.id = 'custom-quick-links-container';
+        buttonContainer.style.cssText = `
+            padding: 15px;
+            margin: 10px 0;
+            background-color: #f3f3f3;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         `;
 
-        const style = document.createElement('style');
-        style.textContent = `
-            @keyframes spin {
-                0% { transform: rotate(0deg); }
-                100% { transform: rotate(360deg); }
-            }
+        const header = document.createElement('h3');
+        header.textContent = 'Quick Links';
+        header.style.cssText = `
+            margin: 0 0 10px 0;
+            font-size: 16px;
+            color: #232F3E;
         `;
-        document.head.appendChild(style);
+        buttonContainer.appendChild(header);
 
-        overlay.appendChild(modal);
-
-        overlay.addEventListener('click', (e) => {
-            if (e.target === overlay || e.target.id === 'closeModal') {
-                overlay.remove();
+        const fleetButton = createButton('Unit Location - Fleet Monitoring', function() {
+            const unitId = getUnitId();
+            if (unitId) {
+                const baseUrl = 'https://aap-na.corp.amazon.com/page/dfd44913-d2f4-4e96-99e2-64729dbdc19a?map-layout=SPLIT&states=%5B%7B%22state%22%3A%22ACTIVE%22%2C%22reasons%22%3A%5B%5D%7D%2C%7B%22state%22%3A%22UNAVAILABLE%22%2C%22reasons%22%3A%5B%5D%7D%5D&fields=%5B%5D&fleets=%5B%220f454f75-1e45-475f-8d8b-2334ade1f6f1%22%2C%227de393df-74e1-45af-9650-560ba008bc65%22%2C%22b84ddc20-589c-4330-af67-3d38f89e28af%22%2C%22b9e02fc4-2b9f-4a70-ac7c-76b30a33bcbe%22%2C%22ba97eda1-cb03-446e-a907-474084194777%22%2C%22daa83ad7-5d8f-43a4-ba9c-76c643e45e1e%22%5D&operationalStatuses=%5B%5D&geofences=%7B%22type%22%3A%22ANYWHERE%22%2C%22customGeofences%22%3A%5B%5D%7D&stationCodes=%5B%5D&dspShortCodes=%5B%5D&flags=%7B%7D&domicileSites=%5B%5D';
+                const fullUrl = baseUrl + '&search=' + unitId;
+                window.open(fullUrl, '_blank');
             }
         });
 
-        return overlay;
+        const relayButton = createButton('Relay Garage Work Orders', function() {
+            const unitId = getUnitId();
+            if (unitId) {
+                const baseUrl = 'https://aap-na.corp.amazon.com/page/817ca098-8441-4329-a71e-6768f9d7e6c5?tab=Unplanned';
+                const fullUrl = baseUrl + '&ids=' + unitId;
+                window.open(fullUrl, '_blank');
+            }
+        });
+
+        buttonContainer.appendChild(fleetButton);
+        buttonContainer.appendChild(relayButton);
+
+        targetElement.parentNode.insertBefore(buttonContainer, targetElement.nextSibling);
+
+        console.log('Quick Links buttons added successfully!');
     }
 
-    function updateModal(overlay, unitId, results) {
-        const modal = overlay.querySelector('div > div');
-        const contentDiv = modal.querySelector('#modalContent');
+    // ========================================
+    // MAIN EXECUTION
+    // ========================================
 
-        const allLoaded = !results.fleet.loading && !results.relay.loading;
+    function init() {
+        const currentUrl = window.location.href;
+        console.log('Script initialized on:', currentUrl);
 
-        if (allLoaded) {
-            contentDiv.innerHTML = `
-                <div style="background: #f5f5f5; padding: 15px; border-radius: 6px; margin-bottom: 15px;">
-                    <h3 style="margin: 0 0 10px 0; color: #FF9900; font-size: 16px;">📡 Fleet Monitoring</h3>
-                    ${results.fleet.error ?
-                        `<p style="color: #d13212; margin: 5px 0;">❌ ${results.fleet.error}</p>` :
-                        `
-                        <p style="margin: 5px 0;"><strong>📍 Last Known Site:</strong> ${results.fleet.lastSite}</p>
-                        <p style="margin: 5px 0;"><strong>🕐 Last GPS Time:</strong> ${results.fleet.lastGPS}</p>
-                        <details style="margin-top: 10px;">
-                            <summary style="cursor: pointer; color: #666;">Debug Info</summary>
-                            <pre style="font-size: 10px; overflow: auto; max-height: 100px;">${results.fleet.rawHTML || 'No data'}</pre>
-                        </details>
-                        `
-                    }
-                </div>
+        // If on Paragon page, add quick link buttons
+        if (currentUrl.includes('paragon-na.amazon.com')) {
+            console.log('On Paragon page - adding quick links');
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', insertButtons);
+            } else {
+                insertButtons();
+            }
+            setTimeout(insertButtons, 2000);
+        }
 
-                <div style="background: #f5f5f5; padding: 15px; border-radius: 6px;">
-                    <h3 style="margin: 0 0 10px 0; color: #FF9900; font-size: 16px;">🔧 Relay Garage</h3>
-                    ${results.relay.error ?
-                        `<p style="color: #d13212; margin: 5px 0;">❌ ${results.relay.error}</p>` :
-                        `<p style="margin: 5px 0;"><strong>Status:</strong> ${results.relay.status}</p>`
-                    }
-                </div>
+        // If on Fleet Monitoring page, convert Yes/No to YMS buttons
+        if (currentUrl.includes('aap-na.corp.amazon.com/page/dfd44913')) {
+            console.log('On Fleet Monitoring page - converting Yes/No to buttons');
 
-                <div style="margin-top: 15px; padding: 10px; background: #fff3cd; border-radius: 4px; font-size: 12px; color: #856404;">
-                    <strong>📝 Note:</strong> Check browser console (F12) for detailed extraction logs
-                </div>
-            `;
+            // Initial conversion
+            setTimeout(convertLoadedStatusToButton, 1000);
+            setTimeout(convertLoadedStatusToButton, 2000);
+            setTimeout(convertLoadedStatusToButton, 3000);
+
+            // Watch for dynamic content changes
+            const observer = new MutationObserver(() => {
+                convertLoadedStatusToButton();
+            });
+
+            observer.observe(document.body, {
+                childList: true,
+                subtree: true
+            });
+
+            // Periodic check for dynamically loaded content
+            setInterval(convertLoadedStatusToButton, 2000);
+        }
+
+        // If on YMS page, auto-fill fields
+        if (currentUrl.includes('trans-logistics.amazon.com/yms/shipclerk')) {
+            console.log('On YMS page - attempting auto-fill');
+
+            // Multiple attempts at different times
+            setTimeout(autoFillYMS, 1000);
+            setTimeout(autoFillYMS, 2000);
+            setTimeout(autoFillYMS, 3000);
+
+            window.addEventListener('load', autoFillYMS);
         }
     }
+
+    // Start the script
+    init();
 })();
