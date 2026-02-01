@@ -1,9 +1,37 @@
+Problem:
+When a work order is escalated to "TOM Pending Action," it's waiting for a response. But there's no easy way to see how long it's been waiting — you only see the "Modified" timestamp.
+
+Original Process Requires:
+Individaully open a page without any time awareness in aim that it is over the timer mark. 
+Open the comment section of the individual work order and look for the comment time.
+Repeating this for every row on the page.
+----Doing this again periodically because time keeps passing. This makes it hard to prioritize which escalations have been waiting the longest or spot ones that are overdue.
+
+Solution: 
+I built a script that automatically calculates elapsed time and displays a live timer badge directly in the table for every TOM Pending Action work order.
+
+What the Script Does:
+1. Finds the table - Locates the work order table on the page
+2. Identifies columns - Caches the location of "Escalations," "Work Order Tags," and "Modified" columns
+3. Scans each row - Checks if the row has "TOM Pending Action" in the Escalations column
+4. Parses timestamp	- Reads the "Modified" date and calculates minutes elapsed
+5. Displays timer - Adds a pink badge (⏱️ 7h 23m) to the "Work Order Tags" column
+6. Updates automatically - Refreshes all timers every 60 seconds
+7. Handles dynamic content -Uses MutationObserver to catch new rows or page changes
+
+Impact:
+Instant visibility — See wait times at a glance without mental math.
+Better prioritization — Oldest escalations stand out immediately.
+Always current — Timers update automatically every minute.
+No workflow change — Information appears right in the existing table.
+
+Script: 
 // ==UserScript==
 // @name         TOM Pending Action Timer - TOM  COMMENT
 // @namespace    http://tampermonkey.net/
 // @version      1.1
 // @description  Adds elapsed time timer to TOM Pending Action work orders
-// @author       Your Name
+// @author       monimag
 // @match        https://aap-na.corp.amazon.com/v2/page/*
 // @match        https://aap-na.corp.amazon.com/page/*
 // @grant        GM_xmlhttpRequest
