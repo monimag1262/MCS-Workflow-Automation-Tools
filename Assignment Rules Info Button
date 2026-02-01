@@ -1,3 +1,34 @@
+Problem:
+When reviewing trailer work orders, you need to verify that the correct photos were submitted based on the type of issue reported. Different defects require different documentation — and the requirements aren't always obvious.
+
+
+Original Process Requires:
+Memorizing dozens of photo requirements for different issue types
+Remembering which issues need a depth gauge, which need a 7-way tester, etc.
+Knowing which defects are "deferrable" (can be canceled) based on size or severity
+Manually checking the "Last Yard Location" field to verify work request accuracy
+Looking up documentation externally when unsure
+---This process leads to inconsistent reviews, missed escalations, and unnecessary back-and-forth.
+
+Solution:
+I built a script that displays a photo requirements checklist directly inside the Report Details modal — and adds an inline verification reminder next to the Last Yard Location field.
+
+
+What the Script Does: 
+1. Detects page type to confirms it's a Trailer asset (skips Hostlers and Tractors)
+2. Injects photo checklist -- Displays a styled "sticky note" box with all photo requirements by issue type (tires, electrical, body, license plate)
+3. Highlights deferral rules -- Shows which issues can be canceled vs. must be escalated
+4. Adds yard location reminder -- Injects a bold "VERIFY WORK REQUEST ACCURACY" warning next to the Last Yard Location field
+5. Provides quick reference --- Includes an :information_source: Info button that opens a checklist modal for work request validation
+
+Impact:
+Faster reviews — All photo requirements visible at a glance
+Fewer errors — No more approving incomplete work orders
+Better deferral decisions — Clear criteria for what can be canceled vs. escalated
+Built-in reminders — Yard location prompt prevents oversight
+No context switching — Everything embedded directly in the workflow
+
+Script: 
 // ==UserScript==
 // @name         Trailer Photo Requirements Guide
 // @namespace    http://tampermonkey.net/
