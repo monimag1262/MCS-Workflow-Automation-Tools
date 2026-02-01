@@ -1,7 +1,6 @@
 Problem:
 When reviewing trailer work orders, you need to verify that the correct photos were submitted based on the type of issue reported. Different defects require different documentation — and the requirements aren't always obvious.
 
-
 Original Process Requires:
 Memorizing dozens of photo requirements for different issue types
 Remembering which issues need a depth gauge, which need a 7-way tester, etc.
@@ -12,7 +11,6 @@ Looking up documentation externally when unsure
 
 Solution:
 I built a script that displays a photo requirements checklist directly inside the Report Details modal — and adds an inline verification reminder next to the Last Yard Location field.
-
 
 What the Script Does: 
 1. Detects page type to confirms it's a Trailer asset (skips Hostlers and Tractors)
