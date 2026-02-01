@@ -28,6 +28,7 @@ More consistent outcomes — Same rules applied every time
 Reduced mental load — No need to memorize complex eligibility criteria
 Built-in documentation — Copy-ready notes for audit trail
 
+Script: 
 // ==UserScript==
 // @name         DooD Eligibility Checker (Hostler)
 // @namespace    http://tampermonkey.net/
